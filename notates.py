@@ -3,9 +3,9 @@ import urllib.request
 import json
 import time
 import random
-from pathlib import Path
-from src.DataTree import DataTree
-from src.Schema import infer_schema
+from pathlib import Psath
+from sunbear.DataTree import DataTree
+from sunbear.Schema import infer_schema
 
 def fetch_bluesky_feed_stream(
     actor=None,

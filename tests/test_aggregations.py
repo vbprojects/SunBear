@@ -1,7 +1,7 @@
 import json
 import itertools
-from src.DataTree import DataTree
-from src.DataBranch import DataBranch
+from sunbear.DataTree import DataTree
+from sunbear.DataBranch import DataBranch
 
 @DataTree.register_method
 @DataBranch.register_method

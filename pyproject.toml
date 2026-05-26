@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sunbear"
+version = "0.2.0"
+description = "A lazy, schema-aware JSON data engine for tree-structured data"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [ { name = "Varun" } ]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -87,7 +87,7 @@ class DataBranch:
         if hasattr(self.source, 'schemas'):
             return self.source.schemas(materialize=False)
         return {}
-
+            
     def collect(self) -> Any:
         records = self.evaluate_records()
         
@@ -299,21 +299,6 @@ class DataBranch:
                 if projected_val is None or (isinstance(projected_val, list) and all(v is None for v in projected_val)):
                     unaggregated.append(copy.deepcopy(r))
                 else:
-                    # To match the original record inside the aggregation array,
-                    # we should probably extract its contents under the key if desired. 
-                    # Wait, the notes show:
-                    # {"Engineer": {"name": "Alice"...}}
-                    # becomes {"Engineer": [{"name": "Alice"...}]}
-                    # So we just take the inner value! 
-                    # Wait, the notes specify:
-                    # {"Engineer" : {"name": "Alice", "age": 30...}}
-                    # aggregated into {"Engineer": [{"name": "Alice",...}]}
-                    # So we append projected_val! NOT the whole record `r`?
-                    # Let's check the notes:
-                    # {"Engineer" : {"name": "Alice", "age": 30...}}
-                    # => {"Engineer": [{"name": "Alice"...}]}
-                    # Yes, the array contains the evaluated dictionary from inside!
-                    # Actually, if projected_val is what we want, let's append it!
                     aggregated_items.append(copy.deepcopy(projected_val))
             
             if aggregated_items:

@@ -1,7 +1,7 @@
 import unittest
 import warnings
 from typing import Callable
-from src.Schema import (
+from sunbear.Schema import (
     Path,
     PrimitiveType,
     NullType,
@@ -13,8 +13,8 @@ from src.Schema import (
     Branch,
     infer_schema
 )
-from src.DataTree import DataTree
-from src.DataBranch import DataBranch
+from sunbear.DataTree import DataTree
+from sunbear.DataBranch import DataBranch
 
 class TestPathResolution(unittest.TestCase):
     def test_parse_depth(self):

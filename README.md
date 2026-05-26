@@ -79,6 +79,47 @@ SunBear infers a schema tree from each record. Schema comparison uses **subset s
 
 Schemas can be **non-transitive**: $A = B$ and $B = C \not\Rightarrow A = C$. When this happens, a warning is raised and you can reconcile to find the minimum union tree.
 
+#### Why Transitive Schema Matters
+
+SunBear is designed for messy, semi-structured data. In real datasets, optional fields often appear as `None` in some records and as nested objects in others. That can create **non-transitive schema equality**: two schemas may each be compatible with an intermediate schema, but not with each other.
+
+Example:
+
+```python
+from src.DataTree import DataTree
+
+dt = DataTree([
+    {
+        "event_id": "e1",
+        "user_id": 101,
+        "label": {
+            "clicked": 1,
+            "dwell_time_sec": 42.7,
+        },
+    },
+    {
+        "event_id": "e2",
+        "user_id": 102,
+        "label": None,
+    },
+    {
+        "event_id": "e3",
+        "user_id": 103,
+        "label": {
+            "purchased": 1,
+            "revenue_usd": 89.99,
+            "attribution": {
+                "channel": "email",
+                "campaign": "spring_launch",
+            }
+        },
+    },
+])
+```
+
+Essentially, we have cannot infer a single structure for the data and say record 2 is missing some fields. In this case, it looks like we have multiple different datasets, and we have to figure out what we are actually looking at to gain domain knowledge. 
+
+a dataset with a single schema can be conerted to tidy data, which is ideal for data analysis. Multiple schemas can be reconciled, just taking the union of all fields and treating missing keys as `None`. The point is that we want to eventually turn tree based data into tabular data, and we need to be able to reason about the structure of the data to do that.
 ---
 
 ## Indexing
