@@ -145,6 +145,16 @@ class TestDataTreeOperations(unittest.TestCase):
         results = br.collect()
         self.assertEqual(results, ["Bachelor's", "Master's", "PhD", None])
 
+    def test_materialize_branch(self):
+        dt = DataTree(self.records)
+        subtree = dt[:2].path("education.degree").materialize()
+
+        self.assertIsInstance(subtree, DataTree)
+        self.assertEqual(subtree.records, [{"degree": "Bachelor's"}, {"degree": "Master's"}])
+
+        transformed = subtree.shallow(lambda row: {**row, "degree": row["degree"].upper()}).collect()
+        self.assertEqual(transformed[0]["degree"], "BACHELOR'S")
+
     def test_breadth_traversal(self):
         dt = DataTree(self.records)
         br = dt[0:2, ["name", "age"]]

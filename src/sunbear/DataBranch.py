@@ -104,6 +104,19 @@ class DataBranch:
             return list(records)
         return records
 
+    def materialize(self):
+        """Evaluate the branch and return a DataTree built from the current state."""
+        from .DataTree import DataTree
+        records = self.collect()
+
+        if isinstance(records, DataTree):
+            return records.mat
+
+        if hasattr(records, '__iter__') and not isinstance(records, (list, tuple)):
+            records = list(records)
+
+        return DataTree(records, defer_evaluation=True)
+
     def __len__(self):
         return len(self.collect())
 
@@ -152,6 +165,9 @@ class DataBranch:
                     if test_val:
                         yield r
                 else:
+                    if col_idx is None:
+                        yield test_val
+                        continue
                     new_r = copy.deepcopy(r)
                     if isinstance(col_idx, list):
                         for j, depth_path in enumerate(parsed_cols):

@@ -124,6 +124,10 @@ class DataTree:
         from .DataBranch import DataBranch
         return DataBranch(self).assign(val)
 
+    def materialize(self):
+        """Return a materialized view of this tree."""
+        return self.mat
+
     def __str__(self):
         if self.stale or not self._schemas:
             self.build_schemas()
