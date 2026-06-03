@@ -3,10 +3,12 @@ import urllib.request
 import json
 import time
 import random
-from pathlib import Psath
+from pathlib import Path
 from sunbear.DataTree import DataTree
-from sunbear.Schema import infer_schema
+from sunbear.Schema import infer_schema, Path
+from functools import cache
 
+@cache
 def fetch_bluesky_feed_stream(
     actor=None,
     endpoint="getTimeline",
@@ -80,6 +82,106 @@ def fetch_bluesky_feed_stream(
         if pages_fetched < max_pages:
             time.sleep(sleep_between_pages)
 
+def fetch_bluesky_firehose_stream(limit=100, record_types=None):
+    """Stream BlueSky firehose records as a generator."""
+    from atproto import FirehoseSubscribeReposClient, parse_subscribe_repos_message, models, CAR
+    import queue
+    import threading
+
+    if record_types is None:
+         record_types = ['app.bsky.feed.post']
+
+    client = FirehoseSubscribeReposClient()
+    q = queue.Queue(maxsize=100)
+    stop_event = threading.Event()
+
+    def on_message_handler(message):
+        if stop_event.is_set():
+            client.stop()
+            return
+            
+        commit = parse_subscribe_repos_message(message)
+        if not isinstance(commit, models.ComAtprotoSyncSubscribeRepos.Commit):
+            return
+        if not commit.blocks: 
+            return
+            
+        car = CAR.from_bytes(commit.blocks)
+        for op in commit.ops:
+            if op.action == 'create':
+                record = car.blocks.get(op.cid)
+                if record and record.get('$type') in record_types:
+                    try:
+                        q.put({
+                            'repo': commit.repo,
+                            'path': op.path,
+                            'cid': str(op.cid),
+                            'record': record
+                        }, block=False)
+                    except queue.Full:
+                        pass
+
+    def run_client():
+        try:
+            client.start(on_message_handler)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=run_client, daemon=True)
+    t.start()
+
+    count = 0
+    try:
+        while limit is None or count < limit:
+            item = q.get()
+            yield item
+            count += 1
+    finally:
+        stop_event.set()
+
+def fetch_jetstream_stream(limit=100, record_types=None):
+    """Stream BlueSky firehose records using Jetstream (JSON over WebSockets)."""
+    import json
+    import websocket # Requires: pip install websocket-client
+
+    if record_types is None:
+        record_types = ['app.bsky.feed.post']
+
+    # Using an official Jetstream public instance
+    url = "wss://jetstream2.us-east.bsky.network/subscribe"
+    
+    # Ask Jetstream to pre-filter collections to save bandwidth
+    collections = "&".join([f"wantedCollections={t}" for t in record_types])
+    ws_url = f"{url}?{collections}"
+
+    ws = websocket.create_connection(ws_url)
+    
+    count = 0
+    try:
+        while limit is None or count < limit:
+            msg = ws.recv()
+            if not msg:
+                break
+                
+            data = json.loads(msg)
+            
+            # Jetstream messages can be 'commit', 'identity', 'account'
+            if data.get('kind') == 'commit':
+                commit = data.get('commit', {})
+                if commit.get('operation') == 'create':
+                    record = commit.get('record')
+                    # Double check type just in case
+                    if record and record.get('$type') in record_types:
+                        item = {
+                            'repo': data.get('did'),
+                            'path': commit.get('collection') + '/' + commit.get('rkey'),
+                            'cid': commit.get('cid'),
+                            'record': record
+                        }
+                        yield item
+                        count += 1
+    finally:
+        ws.close()
 
 # Load feed: prefer cached file, otherwise stream from API and cache
 # feed_path = Path("bluesky_feed.json")
@@ -98,12 +200,12 @@ def fetch_bluesky_feed_stream(
 # feed = list(fetch_bluesky_feed_stream(limit=100, max_pages=50))
 # Clean and flatten feed into records for DataTree
 dt = DataTree(
-    fetch_bluesky_feed_stream(endpoint="getAuthorFeed", actor="bsky.app", limit=100, max_pages=50),
-    defer_evaluation=True,
+    fetch_jetstream_stream(limit=100), 
+    defer_evaluation=True
 )
 print("Streaming author feed (bsky.app)...")
 #%%
-from src.DataBranch import DataBranch
+from sunbear.DataBranch import DataBranch
 @DataTree.register_method
 @DataBranch.register_method
 def head(db, n=5, return_tree=False):
@@ -119,89 +221,41 @@ def head(db, n=5, return_tree=False):
 def chain(db, func):
     return DataBranch(db, operation=func)
 
-@DataTree.register_method
-@DataBranch.register_method
-def explode(db, column_path=None):
-    col_idx = getattr(db, 'projection_col', None)
-    if col_idx is None or not isinstance(col_idx, list):
-        raise TypeError("explode() requires a breadth projection with at least 2 columns")
-
-    # Resolve column names (strings) from the projection
-    col_names = []
-    for c in col_idx:
-        if isinstance(c, str):
-            col_names.append((c, None))  # (name, depth_path)
-        elif isinstance(c, tuple):
-            col_names.append((c[-1], c))
-        else:
-            col_names.append((None, c))
-
-    def op(records):
-        import copy
-        for r in records:
-            # Detect whether records are dicts or lists
-            if isinstance(r, dict):
-                # Find the first column whose value is a list
-                exploded_key = None
-                for name, _ in col_names:
-                    val = r.get(name) if name else None
-                    if isinstance(val, list):
-                        exploded_key = name
-                        break
-                if exploded_key is None:
-                    yield copy.deepcopy(r)
-                    continue
-
-                items = r[exploded_key]
-                if not items:
-                    continue
-
-                for item in items:
-                    row = copy.deepcopy(r)
-                    row[exploded_key] = item
-                    yield row
-
-            elif isinstance(r, (list, tuple)):
-                # Legacy list-format records
-                exploded_idx = None
-                for i in range(len(r)):
-                    if isinstance(r[i], list):
-                        exploded_idx = i
-                        break
-                if exploded_idx is None:
-                    yield copy.deepcopy(r)
-                    continue
-
-                items = r[exploded_idx]
-                if not items:
-                    continue
-
-                for item in items:
-                    row = copy.deepcopy(r)
-                    row[exploded_idx] = item
-                    yield row
-            else:
-                yield copy.deepcopy(r)
-
-    branch = DataBranch(db, operation=op)
-    branch.return_tree = True
-    return branch
-
-# #%%
-# schemas = dt.schemas()
-# schemas[1].diff(schemas[3])
-# dt[:, tuple("post.labels".split("."))].shallow(lambda x: len(x) > 1).collect()
-# # %%
-# schemas[1].show(collapsed=True)
-# #%%
-# dt.head().show(collapsed=True)
-# # %%
-# dt.show(collapsed=True)
 #%%
 dt.head(return_tree=True, n=5).collect().mat.show(collapsed=True)
+@DataTree.register_method
+@DataBranch.register_method
+def select(db, **kwargs):
+    """Select and rename paths in a single pass using primitive map_records."""
+    from sunbear.utils import col
+    for k, v in kwargs.items():
+        if isinstance(v, str):
+            v = col(v)
+        db = db[:, k].assign(v)
+    return db.path(list(kwargs.keys()))
 #%%
 def flatten(x):
     return [item for sublist in x for item in (flatten(sublist) if isinstance(sublist, list) else [sublist])]
 #%%
-dt.path(["post.record.facets.features.tag", "post.record.createdAt"])[:, "tag"].not_(lambda x: x is None).shallow(flatten).not_(lambda x: all(v is None for v in x))[:, ["tag", "createdAt"]].explode()[:, "tag"].not_(lambda x: x is None)[:, ["tag", "createdAt"]].collect()
+from copy import deepcopy
+# dtb = deepcopy(dt)
+dt[:, ['cid', 'record.facets.features.$type']].collect()
+# dtb.chain(deepcopy).path('record.facets.features.$type')[:, '$type'].not_(lambda x: x is None).shallow(flatten).not_(lambda x: all(v is None for v in x)).collect()
+#%%
+dt
+# %%
+
+# %%
+
+# %%
+dt.path('record.embed').head().collect()
+#%%
+dt.head().path("post.record.facets.features.tag")
+#%%
+# Test select
+dt.select(uri="post.uri", text="post.record.text").head().collect()
+#%%
+dt.head().select(uri="post.uri", text="post.record.text").collect()
+#%%
+dt.head(n=100).path(["post.record.facets.features.tag", "post.record.createdAt"])[:, "tag"].not_(lambda x: x is None).shallow(flatten).not_(lambda x: all(v is None for v in x))[:, ["tag", "createdAt"]].explode()[:, "tag"].not_(lambda x: x is None)[:, ["tag", "createdAt"]].collect()
 # %%

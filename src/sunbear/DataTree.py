@@ -19,6 +19,16 @@ class DataTree:
                 setattr(cls, name, func)
 
     def __init__(self, records: Union[List[Dict[str, Any]], 'Iterable[Dict[str, Any]]'] = None, defer_evaluation: bool = False):
+        """Create a new DataTree.
+
+        Parameters
+        ----------
+        records : list[dict] or iterable, optional
+            The JSON records to load. Can be a generator for streaming.
+        defer_evaluation : bool, default=False
+            If True, schema inference is deferred until first access.
+            Useful when loading from a generator to avoid consuming it immediately.
+        """
         self.records = records if records is not None else []
         self._schemas: Dict[int, Schema] = {}  
         self._record_schema_map: List[int] = [] 
@@ -104,6 +114,30 @@ class DataTree:
     def length(self):
         return len(self)
 
+    def map_records(self, func: Callable, copy: bool = True):
+        from .DataBranch import DataBranch
+        return DataBranch(self).map_records(func, copy=copy)
+
+    def copy(self):
+        from .DataBranch import DataBranch
+        return DataBranch(self).copy()
+
+    def filter_records(self, func: Callable):
+        from .DataBranch import DataBranch
+        return DataBranch(self).filter_records(func)
+
+    def flat_map_records(self, func: Callable, copy: bool = True):
+        from .DataBranch import DataBranch
+        return DataBranch(self).flat_map_records(func, copy=copy)
+
+    def head(self, n: int = 5):
+        from .DataBranch import DataBranch
+        return DataBranch(self).head(n)
+
+    def tail(self, n: int = 5):
+        from .DataBranch import DataBranch
+        return DataBranch(self).tail(n)
+
     def shallow(self, func: Callable):
         from .DataBranch import DataBranch
         return DataBranch(self).shallow(func)
@@ -120,9 +154,9 @@ class DataTree:
         from .DataBranch import DataBranch
         return DataBranch(self).not_(func)
 
-    def assign(self, val: Any):
+    def assign(self, expr: Any = None, **kwargs):
         from .DataBranch import DataBranch
-        return DataBranch(self).assign(val)
+        return DataBranch(self).assign(expr, **kwargs)
 
     def materialize(self):
         """Return a materialized view of this tree."""

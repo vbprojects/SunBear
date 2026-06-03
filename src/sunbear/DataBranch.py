@@ -1,6 +1,7 @@
 from typing import Callable, Any, Optional, List
 from .Schema import Schema, Path
-from .utils import isna
+from .utils import isna, resolve_path, col
+
 
 class DataBranch:
     @classmethod
@@ -18,6 +19,17 @@ class DataBranch:
                 setattr(cls, name, func)
 
     def __init__(self, source: Any, operation: Optional[Callable] = None, projection_schema: Optional[Schema] = None):
+        """Create a new DataBranch — a lazy view over a DataTree or another DataBranch.
+
+        Parameters
+        ----------
+        source : DataTree or DataBranch
+            The upstream data source this branch wraps.
+        operation : callable or None
+            A lazy transformation applied on evaluation. Receives an iterable of records.
+        projection_schema : Schema or None
+            Optional schema hint for the branch output.
+        """
         self.source = source
         self.operation = operation
         self.projection_schema = projection_schema
@@ -39,19 +51,66 @@ class DataBranch:
             records = self.operation(records)
             
         return records
+
+    def map_records(self, func: Callable, copy: bool = True) -> 'DataBranch':
+        """Atomic primitive: translates one record to another."""
+        def op(records):
+            import copy as pycopy
+            for r in records:
+                val = pycopy.deepcopy(r) if copy else r
+                yield func(val)
+        branch = DataBranch(self, operation=op)
+        branch.return_tree = True
+        return branch
+
+    def copy(self) -> 'DataBranch':
+        """Yields a deep copy of each record passing through the branch."""
+        return self.map_records(lambda x: x, copy=True)
+
+    def filter_records(self, func: Callable) -> 'DataBranch':
+        """Atomic primitive: filters records where func returns True."""
+        def op(records):
+            for r in records:
+                if func(r):
+                    yield r
+        branch = DataBranch(self, operation=op)
+        branch.projection_col = self.projection_col
+        branch.return_tree = self.return_tree
+        return branch
+
+    def flat_map_records(self, func: Callable, copy: bool = True) -> 'DataBranch':
+        """Atomic primitive: drops one record and yields multiple (flattening)."""
+        def op(records):
+            import copy as pycopy
+            for r in records:
+                val = pycopy.deepcopy(r) if copy else r
+                for item in func(val):
+                    yield item
+        branch = DataBranch(self, operation=op)
+        return branch
+
+    def head(self, n: int = 5) -> 'DataBranch':
+        """Yields the first n records."""
+        def op(records):
+            import itertools
+            return itertools.islice(records, n)
         
-    @staticmethod
-    def _resolve_path(val, path_segments):
-        for i, p in enumerate(path_segments):
-            if isinstance(val, dict):
-                val = val.get(p, None)
-            elif isinstance(val, list):
-                remaining = path_segments[i:]
-                return [DataBranch._resolve_path(item, remaining) for item in val]
-            else:
-                return None
-        return val
+        branch = DataBranch(self, operation=op)
+        branch.projection_col = self.projection_col
+        branch.return_tree = self.return_tree
+        return branch
+
+    def tail(self, n: int = 5) -> 'DataBranch':
+        """Yields the last n records."""
+        def op(records):
+            import collections
+            return iter(collections.deque(records, maxlen=n))
         
+        branch = DataBranch(self, operation=op)
+        branch.projection_col = self.projection_col
+        branch.return_tree = self.return_tree
+        return branch
+
     def _apply_projection(self, records, col_idx):
         if isinstance(col_idx, list):
             parsed_cols = []
@@ -61,12 +120,12 @@ class DataBranch:
             for r in records:
                 row_proj = []
                 for depth_path in parsed_cols:
-                    row_proj.append(DataBranch._resolve_path(r, list(depth_path)))
+                    row_proj.append(resolve_path(r, list(depth_path)))
                 yield row_proj
         else:
             depth_path = Path.parse_depth(col_idx)
             for r in records:
-                yield DataBranch._resolve_path(r, list(depth_path))
+                yield resolve_path(r, list(depth_path))
 
     def schemas(self, materialize: bool = True):
         if not materialize and self.projection_schema:
@@ -89,6 +148,16 @@ class DataBranch:
         return {}
             
     def collect(self) -> Any:
+        """Evaluate the branch DAG and produce the final result.
+
+        Returns
+        -------
+        DataTree or list
+            - If ``return_tree=True`` (set by ``.path()``, ``.assign()``, etc.), returns a
+              ``DataTree`` wrapping the evaluated records.
+            - If a projection column is set (via ``[:, col]``), returns a list of projected values.
+            - Otherwise returns a list of records.
+        """
         records = self.evaluate_records()
         
         if self.return_tree:
@@ -124,68 +193,67 @@ class DataBranch:
         return len(self)
 
     def shallow(self, func: Callable) -> 'DataBranch':
+        """Apply a function to the projected value of each record.
+
+        - If ``func`` returns ``bool``: acts as a filter (keep/discard the record).
+        - If ``func`` returns a non-bool: acts as a mutation (replaces the projected value).
+
+        Parameters
+        ----------
+        func : callable
+            Receives the projected value (or full record if no projection is set).
+
+        Returns
+        -------
+        DataBranch
+        """
         col_idx = getattr(self, 'projection_col', None)
-        
-        def op(records):
-            import copy
-            
-            # Since records could be a generator, we create a parallel generator for projection 
-            # or just calculate it row-by-row
-            parsed_cols = []
+        parsed_cols = []
+        if col_idx is not None:
+            if isinstance(col_idx, list):
+                for c in col_idx:
+                    if isinstance(c, tuple): parsed_cols.append(c)
+                    elif isinstance(c, str): parsed_cols.append(Path.parse_depth(c))
+            else:
+                parsed_cols.append(Path.parse_depth(col_idx))
+                
+        def row_mapper(r):
             if col_idx is not None:
                 if isinstance(col_idx, list):
-                    for c in col_idx:
-                        if isinstance(c, tuple): parsed_cols.append(c)
-                        elif isinstance(c, str): parsed_cols.append(Path.parse_depth(c))
+                    projected_val = [resolve_path(r, list(dp)) for dp in parsed_cols]
                 else:
-                    parsed_cols.append(Path.parse_depth(col_idx))
-                    
-            for r in records:
-                if col_idx is not None:
-                    if isinstance(col_idx, list):
-                        projected_val = []
-                        for depth_path in parsed_cols:
-                            val = r
-                            for p in depth_path:
-                                if isinstance(val, dict): val = val.get(p, None)
-                                else: val = None; break
-                            projected_val.append(val)
-                    else:
-                        depth_path = parsed_cols[0]
-                        val = r
-                        for p in depth_path:
-                            if isinstance(val, dict): val = val.get(p, None)
-                            else: val = None; break
-                        projected_val = val
+                    projected_val = resolve_path(r, list(parsed_cols[0]))
+            else:
+                projected_val = r
+                
+            test_val = func(projected_val)
+            if isinstance(test_val, bool):
+                if test_val:
+                    return [r]
                 else:
-                    projected_val = r
-                    
-                test_val = func(projected_val)
-                if isinstance(test_val, bool):
-                    if test_val:
-                        yield r
-                else:
-                    if col_idx is None:
-                        yield test_val
-                        continue
-                    new_r = copy.deepcopy(r)
-                    if isinstance(col_idx, list):
-                        for j, depth_path in enumerate(parsed_cols):
-                            curr = new_r
-                            for p in depth_path[:-1]:
-                                if p not in curr or not isinstance(curr[p], dict): curr[p] = {}
-                                curr = curr[p]
-                            curr[depth_path[-1]] = test_val[j]
-                    else:
-                        depth_path = parsed_cols[0]
+                    return []
+            else:
+                if col_idx is None:
+                    return [test_val]
+                
+                new_r = r
+                if isinstance(col_idx, list):
+                    for j, depth_path in enumerate(parsed_cols):
                         curr = new_r
                         for p in depth_path[:-1]:
                             if p not in curr or not isinstance(curr[p], dict): curr[p] = {}
                             curr = curr[p]
-                        curr[depth_path[-1]] = test_val
-                    yield new_r
-                    
-        branch = DataBranch(self, operation=op)
+                        curr[depth_path[-1]] = test_val[j]
+                else:
+                    depth_path = parsed_cols[0]
+                    curr = new_r
+                    for p in depth_path[:-1]:
+                        if p not in curr or not isinstance(curr[p], dict): curr[p] = {}
+                        curr = curr[p]
+                    curr[depth_path[-1]] = test_val
+                return [new_r]
+
+        branch = self.flat_map_records(row_mapper, copy=True)
         branch.projection_col = col_idx
         return branch
 
@@ -199,11 +267,10 @@ class DataBranch:
                 val = func(obj)
                 return val if not isinstance(val, bool) else (obj if val else None)
                 
-        def op(records):
-            for item in records:
-                yield _walk(item)
+        def row_mapper(r):
+            return _walk(r)
             
-        branch = DataBranch(self, operation=op)
+        branch = self.map_records(row_mapper, copy=False)
         branch.projection_col = self.projection_col
         return branch
 
@@ -215,37 +282,116 @@ class DataBranch:
             return not func_or_branch(x)
         return self.shallow(negate_func)
 
-    def assign(self, val: Any) -> 'DataBranch':
+    def explode(self) -> 'DataBranch':
+        """Explodes the first matched projecting column that contains a list."""
+        col_idx = getattr(self, 'projection_col', None)
+        if col_idx is None or not isinstance(col_idx, list):
+            raise TypeError("explode() requires a breadth projection with at least 2 columns")
+
+        col_names = []
+        for c in col_idx:
+            if isinstance(c, str):
+                col_names.append((c, None))
+            elif isinstance(c, tuple):
+                col_names.append((c[-1], c))
+            else:
+                col_names.append((None, c))
+
+        def row_flattener(r):
+            if isinstance(r, dict):
+                exploded_key = None
+                for name, _ in col_names:
+                    val = r.get(name) if name else None
+                    if isinstance(val, list):
+                        exploded_key = name
+                        break
+                if exploded_key is None:
+                    return [r]
+
+                items = r[exploded_key]
+                if not items:
+                    return []
+                
+                # yield one copy of row per item
+                res = []
+                import copy
+                for item in items:
+                    row = copy.deepcopy(r)
+                    row[exploded_key] = item
+                    res.append(row)
+                return res
+
+            elif isinstance(r, (list, tuple)):
+                exploded_idx = None
+                for i in range(len(r)):
+                    if isinstance(r[i], list):
+                        exploded_idx = i
+                        break
+                if exploded_idx is None:
+                    return [r]
+
+                items = r[exploded_idx]
+                if not items:
+                    return []
+
+                res = []
+                import copy
+                for item in items:
+                    row = copy.deepcopy(r)
+                    row[exploded_idx] = item
+                    res.append(row)
+                return res
+            else:
+                return [r]
+
+        branch = self.flat_map_records(row_flattener, copy=False)
+        branch.return_tree = True
+        return branch
+
+    def _build_mapper(self, target_path, expr):
+        """Automatically generates a row_mapper function."""
+        from .utils import resolve_path, set_path
+
+        def auto_mapper(record):
+            import copy
+            # 1. Evaluate the expression
+            if hasattr(expr, 'evaluate'):
+                val = expr.evaluate(record)
+            else:
+                val = expr
+                
+            # 2. Assign it to the target path safely
+            new_record = copy.deepcopy(record) if isinstance(record, dict) else record
+            if isinstance(new_record, dict):
+                set_path(new_record, target_path.split('.'), val)
+            return new_record
+            
+        return auto_mapper
+
+    def assign(self, expr: Any = None, **kwargs) -> 'DataBranch':
         col_idx = getattr(self, 'projection_col', None)
         
-        def op(records):
-            import copy
-            
-            parsed_cols = []
-            if col_idx is not None:
-                if isinstance(col_idx, list):
-                    for c in col_idx:
-                        if isinstance(c, tuple): parsed_cols.append(c)
-                        elif isinstance(c, str): parsed_cols.append(Path.parse_depth(c))
-                else:
-                    parsed_cols.append(Path.parse_depth(col_idx))
-                
-            for r in records:
-                new_r = copy.deepcopy(r)
-                if col_idx is not None:
-                    for depth_path in parsed_cols:
-                        curr = new_r
-                        for p in depth_path[:-1]:
-                            if p not in curr or not isinstance(curr[p], dict):
-                                curr[p] = {}
-                            curr = curr[p]
-                        curr[depth_path[-1]] = val
-                yield new_r
-            
-        branch = DataBranch(self, operation=op)
-        branch.projection_col = col_idx
-        branch.return_tree = True 
-        return branch
+        # Case A: Using the syntax `db[:, k].assign(v)`
+        if expr is not None and col_idx is not None:
+            # We assume single string path or single dimension for clarity right now. 
+            # In a more complete implementation, we'd handle tuples and lists of col_idx.
+            target_path = col_idx if isinstance(col_idx, str) else str(col_idx)
+            auto_mapper = self._build_mapper(target_path, expr)
+            branch = self.map_records(auto_mapper, copy=False)
+            branch.projection_col = None # Clear context after assignment
+            branch.return_tree = True 
+            return branch
+
+        # Case B: Standard syntax `db.assign(k=v)` or no projection_col
+        db = self
+        if expr is not None and not kwargs:
+             raise ValueError("Must specify kwargs if expr is provided but projection_col is not set.")
+             
+        for k, v in kwargs.items():
+            auto_mapper = db._build_mapper(k, v)
+            db = db.map_records(auto_mapper, copy=False)
+            db.return_tree = True
+        return db
 
     def add_path(self, dest: str, source_branch: 'DataBranch') -> 'DataBranch':
         def op(records):
@@ -573,16 +719,14 @@ class DataBranch:
             elif isinstance(p, tuple):
                 parsed.append(p)
 
-        def op(records):
-            import copy
-            for r in records:
-                result = {}
-                for depth_path in parsed:
-                    val = DataBranch._resolve_path(r, list(depth_path))
-                    result[depth_path[-1]] = copy.deepcopy(val)
-                yield result
+        def row_mapper(r):
+            result = {}
+            for depth_path in parsed:
+                val = resolve_path(r, list(depth_path))
+                result[depth_path[-1]] = val
+            return result
 
-        branch = DataBranch(self, operation=op)
+        branch = self.map_records(row_mapper, copy=True)
         branch.return_tree = True
         return branch
 
@@ -591,7 +735,9 @@ DataTree.register_method(DataBranch.add_path)
 DataTree.register_method(DataBranch.aggregate)
 DataTree.register_method(DataBranch.group_by)
 DataTree.register_method(DataBranch.path)
+DataTree.register_method(DataBranch.explode)
 DataBranch.register_method(DataBranch.add_path)
 DataBranch.register_method(DataBranch.aggregate)
 DataBranch.register_method(DataBranch.group_by)
 DataBranch.register_method(DataBranch.path)
+DataBranch.register_method(DataBranch.explode)

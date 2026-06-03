@@ -16,7 +16,7 @@ from sunbear.Schema import (
 )
 from sunbear.DataTree import DataTree
 from sunbear.DataBranch import DataBranch
-from sunbear.utils import isna
+from sunbear.utils import isna, resolve_path
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -109,12 +109,12 @@ class TestDataBranchDeep(unittest.TestCase):
         self.dt = DataTree(self.records)
 
     def test_deep_transform(self):
-        result = self.dt.deep(lambda x: x * 10 if isinstance(x, int) else x).collect()
+        result = list(self.dt.deep(lambda x: x * 10 if isinstance(x, int) else x).collect().mat.records)
         self.assertEqual(result[0]["tags"], [10, 20, 30])
 
     def test_deep_filter(self):
         # deep() replaces values that fail the predicate with None, but doesn't remove them
-        result = self.dt.deep(lambda x: x if isinstance(x, int) and x > 2 else None).collect()
+        result = list(self.dt.deep(lambda x: x if isinstance(x, int) and x > 2 else None).collect().mat.records)
         self.assertEqual(result[0]["tags"], [None, None, 3])
 
 
@@ -246,12 +246,12 @@ class TestListTraversal(unittest.TestCase):
 
     def test_resolve_path_static(self):
         val = {"companies": [{"name": "A"}, {"name": "B"}]}
-        result = DataBranch._resolve_path(val, ["companies", "name"])
+        result = resolve_path(val, ["companies", "name"])
         self.assertEqual(result, ["A", "B"])
 
     def test_resolve_path_missing(self):
         val = {"other": "x"}
-        result = DataBranch._resolve_path(val, ["companies", "name"])
+        result = resolve_path(val, ["companies", "name"])
         self.assertIsNone(result)
 
 
