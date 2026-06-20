@@ -2,9 +2,11 @@ from typing import *
 from itertools import *
 # A DataTree is a generator that yeilds a tuple of metadata and records zipped together
 
-branch = Iterator[Tuple[Dict[str, Any], Dict[str, Any]]]
-operator = Callable[[Dict[str, Any], Dict[str, Any]], Tuple[Dict[str, Any], Dict[str, Any]]]
+Branch = Iterator[Tuple['Record', Dict[str, Any]]]
+operator = Callable[['Record', Dict[str, Any]], Tuple['Record', Dict[str, Any]]]
 indexer = str | Tuple[str] | List[str]
+Twig = Tuple['Record', Dict[str, Any]]
+
 
 def construct_schema(record : Dict[str, Any]) -> Dict[str, Any]:
     def _walk(node : Dict[str, Any] | Any) -> Any:
@@ -13,34 +15,6 @@ def construct_schema(record : Dict[str, Any]) -> Dict[str, Any]:
         else:
             return type(node).__name__
     return _walk(record)
-
-
-def construct_metadata(record : Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "schema": construct_schema(record)
-    }
-
-def yield_branches(branches : Iterator[Tuple[Dict[str, Any], Dict[str, Any]]], pre_operator : operator, post_operator : operator) -> branch:
-    for record, metadatum in branches:
-        pre_operated_record, pre_operated_metadata = pre_operator(record, metadatum)
-        
-        if pre_operated_metadata is None:
-            continue
-        if 'break' in pre_operated_metadata:
-            break
-        
-        mid_metadatum = {**metadatum, **pre_operated_metadata}
-        
-        post_operated_record, post_operated_metadata = post_operator(pre_operated_record, mid_metadatum)
-        
-        if post_operated_metadata is None:
-            continue
-        if 'break' in post_operated_metadata:
-            break
-        
-        post_metadatum = {**mid_metadatum, **post_operated_metadata}
-        
-        yield post_operated_record, post_metadatum
 
 def _resolve_path(indexer : str) -> Dict[str, Any]:
     elems = indexer.split('.')
@@ -184,114 +158,108 @@ def _register(**kwargs) -> operator:
         return record, {"register": resolved_indexers}
     return _register_op
 
+from itertools import tee
+
+def map_iteration(branches : Iterator[Tuple['Record', Dict[str, Any]]], pre_operator : operator, post_operator : operator) -> Branch:
+    for record, metadatum in branches:
+        pre_operated_record, pre_operated_metadata = pre_operator(record, metadatum)
+        mid_metadatum = {**metadatum, **pre_operated_metadata}
+        post_operated_record, post_operated_metadata = post_operator(pre_operated_record, mid_metadatum)
+        post_metadatum = {**mid_metadatum, **post_operated_metadata}
+        yield post_operated_record, post_metadatum
+
+
+def filter_iteration(branches, condition) -> Branch:
+    for record, metadata in branches:
+        if condition(record, metadata):
+            yield record, metadata
+
+def insertion_iteration(branches, condition, operation) -> Branch:
+    for record, metadata in branches:
+        if condition(record, metadata):
+            new_record, new_metadata = operation(record, metadata)
+            yield new_record, {new_metadata}
+        else:
+            yield record, metadata
+
+def one_to_many_iteration(branches, condition, operation) -> Branch:
+    for record, metadata in branches:
+        if condition(record, metadata):
+            new_records = operation(record, metadata)
+            for new_record in new_records:
+                yield new_record, metadata
+        else:
+            yield record, metadata
+
+from collections import defaultdict
+
+def many_to_one_iteration(branches, key, operation) -> Branch:
+    """Group *branches* by *key* (a callable) without requiring sorted input.
+
+    Uses a dict to collect all twigs sharing the same key, then passes each
+    group as an iterator to *operation*.  Groups appear in first-encounter order.
+    """
+    groups: Dict[Any, List[Twig]] = defaultdict(list)
+    for twig in branches:
+        groups[key(twig)].append(twig)
+
+    for group_key, group_list in groups.items():
+        new_record, metadata = operation(iter(group_list))
+        yield new_record, {"group_key": group_key, **metadata}
+
 
 class DataTree:
-    def __init__(self, records : Iterator[Tuple[Dict[str, Any], Dict[str, Any]]], pre_operator : Optional[operator] = None, post_operator : Optional[operator] = None):
+    def __init__(self, records : Iterator[Tuple[Dict[str, Any], Dict[str, Any]]]):
         self._records = records
-        self.pre_operator = pre_operator or identity
-        self.post_operator = post_operator or identity
+        # self.pre_operator = pre_operator or identity
+        # self.post_operator = post_operator or identity
     
     @classmethod
     def from_iterator(cls, iterator : Iterator[Dict[str, Any]], pre_operator : Optional[operator] = None, post_operator : Optional[operator] = None):
-        return cls(((Record(record), {"index": i}) for i, record in enumerate(iterator)), pre_operator, post_operator)
+        return cls(((Record(record), {"index": i}) for i, record in enumerate(iterator)))
     
-    def __iter__(self) -> branch:
-        return yield_branches(self._records, self.pre_operator, self.post_operator)
-    
-    def head(self, n : int = 5) -> 'DataTree':
-        counter = count()
-        def _head_op(record, metadata):
-            if next(counter) < n:
-                return record, {}
-            else:
-                return record, {'break': True}
-        return DataTree(self, _head_op, identity)
+    def __iter__(self) -> Branch:
+        self._records, to_iterate = tee(self._records, 2)
+        # return map_iteration(to_iterate)
+        for record, metadata in to_iterate:
+            yield record, metadata
 
-    
-    
-    def register(self, **kwargs) -> 'DataTree':
-        """Promises to resolve paths and add them to metadata register for use in downstream operators."""
-        def _register_op(record, metadata):
-            resolved_indexers = {k: Record._resolve_indexer(v) for k, v in kwargs.items()}
-            return record, {"register": resolved_indexers}
-        return DataTree(self, _register_op, identity)
-    
     def select(self, **kwargs) -> 'DataTree':
         """Creates new records by registering paths and extracting values from them."""
         def _select_op(record, metadata):
             return {k: record.get(metadata['register'][k]) for k in kwargs.keys()}, {"register" : None}
-        return DataTree(self, _register(**kwargs), _select_op)
-
+        return DataTree(map_iteration(self, _register(**kwargs), _select_op))
     
     def filter(self, func : Callable[["Record"], bool]) -> 'DataTree':
-        def _filter_operation(record, metadata):
-            if func(record):
-                return record, {}
-            else:
-                return None, {}  # Filter out by returning None metadata
-        return DataTree(self, _filter_operation, identity)
+        return DataTree(filter_iteration(self, func))
 
-    def flat_map(self, func : Callable[["Record"], Iterable[Dict[str, Any]]]) -> 'DataTree':
-        """Apply *func* to each record, which should return an iterable of new records to flatten into the stream."""
-        def _flat_map_op(record, metadata):
-            new_records = func(record)
-            if not isinstance(new_records, Iterable):
-                raise ValueError("flat_map function must return an iterable")
-            return new_records, {}
-        return DataTree(self, identity, _flat_map_op)
-    
-    def reduce(self, func: Callable[[Any, "Record"], Any], initial: Any = None) -> 'DataTree':
-        """Lazily evaluates the tree into a single record using an accumulator function."""
-        def _reduce_gen():
-            iterator = iter(self)
-            try:
-                # Initialize accumulator
-                acc = initial if initial is not None else next(iterator)[0]
-                
-                # Consume the stream dynamically upon evaluation
-                for record, _ in iterator:
-                    acc = func(acc, record)
-                    
-                # Wrap the final accumulated state into a Record for downstream pipelines
-                final_record = acc if isinstance(acc, Record) else Record(acc) if isinstance(acc, dict) else Record({"result": acc})
-                yield final_record, {"reduce": True}
-                
-            except StopIteration:
-                if initial is not None:
-                    final_record = Record(initial) if isinstance(initial, dict) else Record({"result": initial})
-                    yield final_record, {"reduce": True}
-        
-        # Returns a pending generator inside a new DataTree
-        return DataTree(_reduce_gen())
+    def _group_by_op_indexer(self, indexer):
+        resolved_index = Record._resolve_indexer(indexer)
+        counter = count()
+        def _group_by_key(twig):
+            record, metadata = twig
+            group_key = record.get_leaves(resolved_index)
+            return group_key
+        def _group_by_op(group):
+            return Record({"records": [{"data" : record.data, "metadata" : metadatum} for record, metadatum in group]}), {"index" : next(counter)}
+        return _group_by_key, _group_by_op
 
-    def group_by(self, key_path: str, agg_func: Callable[[Any, "Record"], Any], initial: Any) -> 'DataTree':
-        """Lazily groups records by a key and reduces them using agg_func."""
-        def _group_gen():
-            groups = {}
-            path = Record._resolve_indexer(key_path)
-            import copy
-            
-            # Consume all upstream records to build aggregation buckets
-            for record, _ in self:
-                key_val = record.get(path)
-                
-                # Convert unhashable types for dict keys
-                if isinstance(key_val, list):
-                    key_val = tuple(key_val)
-                elif isinstance(key_val, dict):
-                    key_val = tuple(key_val.items())
-                    
-                if key_val not in groups:
-                    groups[key_val] = copy.deepcopy(initial)
-                    
-                groups[key_val] = agg_func(groups[key_val], record)
-                
-            # Once exhaustive processing is done, yield each group as a stream of new records
-            for k, final_state in groups.items():
-                yield Record({"group": k, "aggregated": final_state}), {"group_by": True}
-                
-        # Returns a pending generator inside a new DataTree
-        return DataTree(_group_gen())
+    def group_by(self, key = None) -> 'DataTree':
+        if key is None:
+            def _group_by_metadata_register(twig):
+                record, metadata = twig
+                index = metadata['register'][0]
+                return record.get_leaves(index)
+            _group_by_metadata_register, group_by_op = self._group_by_op_indexer(key)
+            return DataTree(many_to_one_iteration(self, _group_by_metadata_register, group_by_op))
+        if isinstance(key, str) or isinstance(key, tuple) or isinstance(key, list):
+            group_by_key, group_by_op = self._group_by_op_indexer(key)
+            return DataTree(many_to_one_iteration(self, group_by_key, group_by_op))
+        if callable(key):
+            def _group_by_op(group):
+                return Record({"records": [{"data": r.data, "metadata": m} for r, m in group]}), {}
+            return DataTree(many_to_one_iteration(self, key, _group_by_op))
+        return self    
 
     def col(self, **kwargs) -> List[Any]:
         """Collect values from the stream based on registered paths."""
@@ -299,9 +267,15 @@ class DataTree:
         def _collect_op(record, metadata):
             return [record.get_leaves(metadata['register'][k]) for k in kwargs.keys()], {}
         collected.append([k for k in kwargs.keys()])
-        for record, _ in yield_branches(self, _register(**kwargs), _collect_op):
+        for record, _ in map_iteration(self, _register(**kwargs), _collect_op):
             collected.append(record)
         return collected
+    
+    def head(self, n=5):
+        for i, twig in enumerate(self):
+            if i >= n:
+                break
+            yield twig
         
         
 
@@ -318,7 +292,9 @@ def __main__():
     # for record, metadata in tree.head(5).head(3):
         # print(record, metadata)
     # print(Record({"records": [{"name": "Alice", "ages": [30, 31]}, {"name": "Bob", "ages": [25, 27]}]}, ).get(Record._resolve_indexer("records.ages")))
-    print(tree.head(n=2).col(name = "name", age = "age"))
-    print(tree.group_by("age"))
+    # print(tree.head(n=2).col(name = "name", age = "age"))
+    # print(tree.group_by("age").col(name = ))
+    for record, metadata in tree.group_by("age"):
+        print(record.data, metadata)
 if __name__ == "__main__":
     __main__()

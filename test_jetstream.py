@@ -28,7 +28,7 @@ def fetch_jetstream_stream(limit=100, record_types=None):
                 commit = data.get('commit', {})
                 if commit.get('operation') == 'create':
                     record = commit.get('record')
-                    if record and record.get('\') in record_types:
+                    if record and record.get('type') in record_types:
                         item = {
                             'repo': data.get('did'),
                             'path': commit.get('collection') + '/' + commit.get('rkey'),
