@@ -1,93 +1,42 @@
-"""sunbear expr — declarative expression builder API for SunBear DataTrees.
+"""expr — declarative expression builder for DataTree.
 
-Usage:
-    import sunbear as sb
-    import numpy as np
-    from sunbear.expr import b, assign, keep, Symbols
+Lower-level pieces (re-exported):
+    b       — LazyNamespace, builds Path instances via attribute access
+    _       — Placeholder for chain()
+    Col     — explicit column reference (Sym-like)
+    Lit, BinOp, UnOp, Call, Path, Placeholder — AST nodes
 
-    age, height = Symbols("record.age", "record.height")
-    mu = np.mean(dt.pluck(age))
+Statement builders (return tuples):
+    assign(target, value)
+    keep(pred)
+    filter(target, pred)       — intra-record lazy filter
+    map_field(target, fn)      — intra-record sbo.map
+    flatten(target, level=-1)
+    fork(cond, then_block, else_block)
+    case(*clauses, default=())
 
-    dt.expr(
-        assign(b.normalized, (age - mu) / 2),
-        keep(b.normalized < 50),
-    )
+Runtime (sbo namespace):
+    sbo.flatten(value, level=-1)
+    sbo.filter(value, pred)     — value-tier lazy filter (uses meta skip-flags)
+    sbo.map(value, fn)
+    sbo.reduce(value, fn, init=_MISSING)
+    sbo.length(value)
 """
-
-# AST nodes
 from .ast import (
-    Expr,
-    Lit,
-    Col,
-    BinOp,
-    UnOp,
-    Call,
-    # Statements
-    Statement,
-    Assign,
-    Keep,
-    Fork,
-    Case,
-    MapAssign,
-    # Statement constructors
-    assign,
-    map_assign,
-    keep,
-    fork,
-    case,
-    # Placeholder
-    _,
-    # helpers
-    _wrap,
+    Expr, Lit, Col, BinOp, UnOp, Call, Path, Placeholder, b, _,
+    _wrap, substitute,
 )
-
-# Namespace (symbolic references)
-from .namespace import (
-    Sym,
-    Symbols,
-    PathBuilder,
-    LazyNamespace,
-    b,
-    as_indexer,
+from .eval import compile, OPS, FUNCS, register_func
+from .lower import (
+    assign, keep, filter_field, map_field, flatten,
+    fork, case, run_expr,
 )
-
-# Evaluator
-from .eval import eval_value, eval_predicate, OPS, FUNCS
+from . import sbo
 
 __all__ = [
-    # AST
-    "Expr",
-    "Lit",
-    "Col",
-    "BinOp",
-    "UnOp",
-    "Call",
-    # Statements
-    "Statement",
-    "Assign",
-    "MapAssign",
-    "Keep",
-    "Fork",
-    "Case",
-    # Constructors
-    "assign",
-    "map_assign",
-    "keep",
-    "fork",
-    "case",
-    # Placeholder
-    "_",
-    "_wrap",
-    # Namespace
-    "Sym",
-    "Symbols",
-    "PathBuilder",
-    "LazyNamespace",
-    "b",
-    "as_indexer",
-    # Eval
-    "eval_value",
-    "eval_predicate",
-    "OPS",
-    "FUNCS",
+    "Expr", "Lit", "Col", "BinOp", "UnOp", "Call", "Path", "Placeholder",
+    "b", "_", "_wrap", "substitute", "compile", "OPS", "FUNCS", "register_func",
+    "assign", "keep", "filter_field", "map_field", "flatten",
+    "fork", "case", "run_expr",
+    "sbo",
 ]

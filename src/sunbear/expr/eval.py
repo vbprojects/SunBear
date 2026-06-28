@@ -1,13 +1,14 @@
-"""eval.py — per-record evaluator for Expr nodes.
+"""eval.py — compile AST to per-record closure + intra-record ops registry.
 
-Runs against a single Record — NO DataTree awareness.
+Two halves:
+1. compile(node) → (record) → value. Pure AST walker, no DataTree awareness.
+2. FUNCS registry for value-tier ops (sbo.flatten/filter/map/reduce/length).
+   `sbo.filter` uses the metadata skip-flag mechanism for lazy iteration.
 """
 from __future__ import annotations
+from typing import Any, Callable
 
-from .ast import (
-    Expr, Lit, Col, BinOp, UnOp, Call, Placeholder,
-)
-# Handle PathBuilder from namespace.py at runtime to avoid circular import
+from .ast import Expr, Lit, Col, BinOp, UnOp, Call, Path, Placeholder
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -15,68 +16,169 @@ from .ast import (
 # ═══════════════════════════════════════════════════════════════════════════
 
 OPS = {
-    "+": lambda a, b: a + b,
-    "-": lambda a, b: a - b,
-    "*": lambda a, b: a * b,
-    "/": lambda a, b: a / b,
-    "<": lambda a, b: a < b,
+    "+":  lambda a, b: a + b,
+    "-":  lambda a, b: a - b,
+    "*":  lambda a, b: a * b,
+    "/":  lambda a, b: a / b,
+    "<":  lambda a, b: a < b,
     "<=": lambda a, b: a <= b,
-    ">": lambda a, b: a > b,
+    ">":  lambda a, b: a > b,
     ">=": lambda a, b: a >= b,
     "==": lambda a, b: a == b,
     "!=": lambda a, b: a != b,
-    "&": lambda a, b: a & b,
-    "|": lambda a, b: a | b,
-    "~": lambda a: not a,  # UnOp — invert boolean
+    "&":  lambda a, b: bool(a) and bool(b),
+    "|":  lambda a, b: bool(a) or bool(b),
+    "~":  lambda a: not a,
 }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# FUNCS registry — populated by ops.py at import time
+# FUNCS registry — populated by intra-record ops (below)
 # ═══════════════════════════════════════════════════════════════════════════
 
 FUNCS: dict = {}
 
 
-def register_func(name: str, fn):
+def register_func(name: str, fn: Callable) -> None:
     """Register a runtime implementation for a value-tier op."""
     FUNCS[name] = fn
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Evaluator
+# compile — AST → (record) → value
 # ═══════════════════════════════════════════════════════════════════════════
 
-def eval_value(node: Expr, record):
-    """Evaluate an Expr node against a single Record.
+def compile(node: Expr):
+    """Compile an Expr node to a closure ``(record) → value``.
 
-    - Lit → node.value (returned unchanged)
-    - Col / PathBuilder → record.get_leaves(node.indexer)
-    - BinOp / UnOp → OPS[op](...)
-    - Call → FUNCS[name](*eval(args), **eval(kwargs))
-    - Placeholder → raises RuntimeError (should be substituted by chain)
+    Path binding lives in Col/Path: ``r.get(node.indexer)``.
     """
     if isinstance(node, Lit):
-        return node.value
+        v = node.value
+        return lambda r: v
     if isinstance(node, Col):
-        return record.get_leaves(node.indexer)
-    # PathBuilder check by class name to avoid circular import
-    if type(node).__name__ == "PathBuilder":
-        return record.get_leaves(node.indexer)
+        ix = node.indexer
+        return lambda r: r.get(ix)
+    if isinstance(node, Path):
+        ix = node.indexer
+        return lambda r: r.get(ix)
     if isinstance(node, BinOp):
-        return OPS[node.op](eval_value(node.left, record), eval_value(node.right, record))
+        L = compile(node.left)
+        R = compile(node.right)
+        op = OPS[node.op]
+        return lambda r: op(L(r), R(r))
     if isinstance(node, UnOp):
-        return OPS[node.op](eval_value(node.operand, record))
+        operand = compile(node.operand)
+        op = OPS[node.op]
+        return lambda r: op(operand(r))
     if isinstance(node, Call):
-        return FUNCS[node.name](
-            *[eval_value(a, record) for a in node.args],
-            **{k: eval_value(v, record) for k, v in node.kwargs.items()}
-        )
+        A = [compile(a) for a in node.args]
+        K = {k: compile(v) for k, v in node.kwargs.items()}
+        # Ops that need the record itself (for metadata side-effects).
+        # They receive (value..., record) as trailing positional arg.
+        _RECORD_AWARE = {"filter"}
+        if node.name in _RECORD_AWARE:
+            def closure(r, _A=A, _K=K, _name=node.name):
+                return FUNCS[_name](
+                    *[a(r) for a in _A],
+                    r,
+                    **{k: v(r) for k, v in _K.items()},
+                )
+            return closure
+        def closure(r, _A=A, _K=K, _name=node.name):
+            return FUNCS[_name](
+                *[a(r) for a in _A],
+                **{k: v(r) for k, v in _K.items()},
+            )
+        return closure
     if isinstance(node, Placeholder):
         raise RuntimeError("'_' placeholder used outside chain() — must be substituted at build time")
     raise TypeError(f"Unknown Expr node: {type(node).__name__}")
 
 
-def eval_predicate(node: Expr, record) -> bool:
-    """Evaluate a predicate expression against a record, coercing to bool."""
-    return bool(eval_value(node, record))
+# ═══════════════════════════════════════════════════════════════════════════
+# Intra-record ops (sbo.*) — operate on values within a single record
+# ═══════════════════════════════════════════════════════════════════════════
+
+_MISSING = object()
+
+
+def _coerce_list(v):
+    if isinstance(v, list):
+        return v
+    if v is None or v is _MISSING:
+        return []
+    return list(v)
+
+
+def _flatten_value(v, level):
+    """Flatten a nested list structure.
+
+    level=-1 (default) flattens fully. level=N flattens N levels deep.
+    """
+    items = _coerce_list(v)
+    if level == 0:
+        return list(items)
+    out = []
+    for x in items:
+        if isinstance(x, list):
+            if level < 0:
+                out.extend(_flatten_value(x, -1))
+            else:
+                out.extend(_flatten_value(x, level - 1))
+        else:
+            out.append(x)
+    return out
+
+
+def _filter_value(v, pred, record):
+    """LAZY FILTER — writes a skip mask into record.meta; returns the kept items.
+
+    The DataTree scan loop consumes the mask during iteration to filter out
+    skipped elements WITHOUT having to materialize the skip list eagerly.
+    """
+    items = _coerce_list(v)
+    skip_mask = []
+    kept = []
+    for item in items:
+        keep = bool(pred(item))
+        skip_mask.append(not keep)
+        if keep:
+            kept.append(item)
+    if any(skip_mask):
+        record.meta.setdefault("_skips", {})[id(record)] = skip_mask
+    return kept
+
+
+def _map_value(v, fn):
+    items = _coerce_list(v)
+    return [fn(x) for x in items]
+
+
+def _reduce_value(v, fn, init):
+    items = _coerce_list(v)
+    if not items:
+        if init is _MISSING:
+            raise ValueError("sbo.reduce of empty list with no init")
+        return init
+    acc = items[0] if init is _MISSING else init
+    it = items[1:] if init is _MISSING else items
+    for x in it:
+        acc = fn(acc, x)
+    return acc
+
+
+def _length_value(v):
+    if v is None or v is _MISSING:
+        return 0
+    return len(v)
+
+
+# Register at import time
+register_func("flatten", _flatten_value)
+register_func("filter", _filter_value)
+register_func("map", _map_value)
+register_func("reduce", _reduce_value)
+register_func("length", _length_value)
+register_func("size", _length_value)
+register_func("count", _length_value)

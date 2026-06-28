@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+src_old/*
+.old_src/*
+.sunbearv2/*

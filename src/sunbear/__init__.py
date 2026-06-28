@@ -1,50 +1,29 @@
-"""sunbearv3 — invertible, row-based DataTree satisfying L1/L2."""
+"""sunbear — minimal, iterator-native row-based JSON data engine.
 
+Architecture:
+    - DataTree: lazy inter-record table; primitives return iterators
+    - Plan:     explicit index with cardinality detection for group_by/join
+    - Record:   single _walk for get/set/delete; mutable, shared by ref
+    - Schema:   carried over from v3; type-level trees with Jupyter viz
+    - expr:     declarative builder, AST compiles to per-row closure
 
-from .Record import Record, _MISSING, _Missing, _deep_merge, _freeze, construct_schema
-from .DataTree import DataTree, _clone, Twig, State, Undo
+Dropped: invertibility (no _history, no undo closures, no provenance markers).
+"""
+from .DataTree import DataTree, Plan, Twig
+from .Record import Record, _freeze, _mkpath
+
 from .Schema import (
-    Schema,
-    SchemaType,
-    Primitive,
-    NullType,
-    UnionType,
-    ListType,
-    CustomType,
-    Leaf,
-    Branch,
-    Node,
-    infer_schema,
-    reconcile,
-    combine_types,
+    Schema, SchemaType, Primitive, NullType, UnionType, ListType, CustomType,
+    Leaf, Branch, Node, infer_schema, reconcile, combine_types,
 )
 
-# Expose the expr submodule so `from sunbear import expr` works
 from . import expr
 
 __all__ = [
-    "DataTree",
-    "Record",
-    "_clone",
-    "Twig",
-    "State",
-    "Undo",
-    "_MISSING",
-    "_Missing",
-    "_deep_merge",
-    "_freeze",
-    "construct_schema",
-    "Schema",
-    "SchemaType",
-    "Primitive",
-    "NullType",
-    "UnionType",
-    "ListType",
-    "CustomType",
-    "Leaf",
-    "Branch",
-    "Node",
-    "infer_schema",
-    "reconcile",
-    "combine_types",
+    "DataTree", "Plan", "Twig",
+    "Record", "_freeze", "_mkpath",
+    "Schema", "SchemaType", "Primitive", "NullType", "UnionType",
+    "ListType", "CustomType", "Leaf", "Branch", "Node",
+    "infer_schema", "reconcile", "combine_types",
+    "expr",
 ]
