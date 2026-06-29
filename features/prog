@@ -1,0 +1,25 @@
+Programs are deferred functions that operate on DataTrees. This is implemented as a class Program. Programs essentially shadow the methods available to a DataTree. 
+
+```{python}
+prog = Program().expr(
+    # expressions
+)
+
+prog(dt)
+```
+
+Programs can be initialized with a cache, this cache stores a hash of an input, an input, and its corresponding output twig. This only applies when operations can be represented by maps and map_filters, filters that skip iteration, for now just store expressions as programs.
+
+Cache's for now can be implemented as json files, the name should default some hash of the program.
+
+```{python}
+prog = Program(cache = FileCache("get_tags"))
+```
+
+Implement the Program, AbstractCache, and FileCache backends. We can also load DataTrees from the output cache of a file.
+
+```{python}
+dt = prog.to_DataTree()
+```
+
+Do a minimal implementation for the current sunbear implementation

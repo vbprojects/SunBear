@@ -201,6 +201,33 @@ class DataTree:
             for a, ix in aliases.items():
                 cols[a].append(r.get(ix))
         return cols
+    
+    # ---- terminal iterators (yield data) ----
+    
+    def iterrows(self, **aliases) -> Iterator[dict]:
+        """Yield each row as a plain dict."""
+        for r, _ in self.scan():
+            yield {a: r.get(k) for a, k in aliases.items()}
+    
+    def itercols(self, **aliases) -> Iterator[dict]:
+        """Yield each column as a list."""
+        for a, k in aliases.items():
+            yield {a: [r.get(k) for r, _ in self.scan()]}
+    
+    def iterpluck(self, indexer) -> Iterator[Any]:
+        """Yield each value in a single column."""
+        for r, _ in self.scan():
+            yield r.get(indexer)
+    
+    def itercollect(self) -> Iterator[dict]:
+        """Yield each row as a plain dict."""
+        for r, _ in self.scan():
+            yield dict(r.data)
+    
+    ipluck = iterpluck
+    icollect = itercollect
+    irows = iterrows
+    icols = itercols
 
     # ---- LAZY primitives (return generators) ----
 

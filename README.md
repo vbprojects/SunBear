@@ -1,57 +1,79 @@
-# SunBear — Invertible, Row-Based JSON Data Engine
+# SunBear — Lazy, Schema-Aware JSON Data Engine
 
 SunBear is a **row-based** data processing library for tree-structured JSON
-data. It builds **constructive invertibility** (L1/L2) into every operation:
-every transform records a backward closure, so `invert_all()` can unwind the
-full pipeline back to the source state.
+data. It combines lazy evaluation, a declarative expression builder, row-based
+caching, and type-level schema inference into a lightweight, composable toolkit.
 
 ## Key Features
 
-- **Immutable, thread-safe DataTree** — every operation returns a new tree
-- **Constructive invertibility** — `invert()` undoes the last op, `invert_all()`
-  unwinds the entire pipeline
+- **Lazy DataTree** — iterator-native design; primitives (`map`, `filter`,
+  `branch_map`) return generators that don't materialize until consumed
+- **Plan layer** — inter-record operations (`group_by`, `join`, `reduce_by`)
+  build an index with cardinality detection (1:1, 1:N, N:1, N:M)
 - **Declarative expression builder** (`dt.expr(...)`) — syntactic sugar that
-  lowers to invertible DataTree ops:
+  lowers to DataTree ops:
   - `assign`, `keep` (row filter), `fork`/`case` (conditional branches)
   - `sbo` value-tier ops: `flatten`, `filter`, `map`, `reduce`, `chain`
   - `Expr.__call__` syntax: `b.createdAt(lambda t: datetime.fromisoformat(t))`
+- **Row-based Program caching** — `Program` defers an expr pipeline; each
+  input row is hashed individually for cache hit/miss
 - **Schema inference and reconciliation** — type-level schema trees with null
-  invariance, type invariance, and non-transitive semantics
-- **Rich record indexer system** — dotted paths, tuples, lists, dicts
-- **No external dependencies** (beyond Python 3.10+)
+  invariance, type invariance (Leaf equivalence), and non-transitive semantics
+- **Rich Record indexer** — dotted paths, tuples, lists, dicts; single `_walk`
+  for get/set/delete
+- **Async data sources** — `ADict` bridges async streams (HTTP, WebSocket)
+  into synchronous DataTrees
+- **No external dependencies** (beyond Python 3.10+; NumPy optional for
+  aggregations)
+
+## Architecture Overview
+
+| Module      | Purpose |
+|-------------|---------|
+| `DataTree`  | Lazy row-based table; primitives return generators, inter-record ops use Plan indexing |
+| `Record`    | Row payload with a single recursive `_walk` for get/set/delete; mutable, shared by reference |
+| `Plan`      | Index built from a materialized stream with cardinality detection |
+| `Schema`    | Type-level schema trees with inference, reconciliation, and rich visualization |
+| `Program`   | Deferred expr pipeline with row-based caching (FileCache backend) |
+| `expr`      | Declarative expression builder (AST → per-row closures) |
+| `sbo`       | Value-tier intra-record ops (flatten, filter, map, reduce, chain) |
+| `ADict`     | Async dict proxy for bridging async data sources |
 
 ## Quick Start
 
 ```python
 import sunbear as sb
-from sunbear.expr import b, assign, keep, Symbols
-import sunbear.ops as sbo
+from sunbear.expr import b, assign, keep, sbo
 import numpy as np
 
 records = [
-    {"name": "Alice", "age": 30, "height": 170,
-     "tags": [[["ring"], [40, 44]], [["red"], [31, 34]]]},
-    {"name": "Bob",   "age": 25, "height": 165, "tags": []},
+    {"name": "Alice", "age": 30, "tags": [["ring"], ["gold"]]},
+    {"name": "Bob",   "age": 25, "tags": []},
+    {"name": "Carol", "age": 17, "tags": [["silver"], ["bronze"]]},
 ]
 
 dt = sb.DataTree.from_records(records)
 
-# Basic projection and aggregation
-mu = np.mean(dt.pluck(b.age))
-std = np.std(dt.pluck(b.age))
-
 # Expression pipeline
 dt2 = dt.expr(
-    assign(b.s_age, (b.age - mu) / std),
-    assign(b.flat_tags, sbo.chain(
-        sbo.flatten(b.tags, -1),
-        sbo.filter(_, lambda x: isinstance(x, str)),
-    )),
-    keep(sbo.length(b.flat_tags) > 0),
+    assign(b.status, "active"),
+    assign(b.flat_tags, sbo.flatten(b.tags, -1)),
+    keep(b.age >= 18),
 )
 
-# Invertible — round-trip back to original
-assert dt2.invert_all().twigs == dt.twigs
+print(dt2.collect())
+# [{'name': 'Alice', 'age': 30, 'tags': [...], 'status': 'active', 'flat_tags': ['ring', 'gold']},
+#  {'name': 'Carol', 'age': 25, 'tags': [...], 'status': 'active', 'flat_tags': ['silver', 'bronze']}]
+
+# Program (deferred with caching)
+from sunbear import Program
+
+prog = Program(name="adults").expr(
+    assign(b.status, "active"),
+    keep(b.age >= 18),
+)
+result = prog(dt)   # first run: cache miss, executes pipeline
+result = prog(dt)   # second run: cache hit, skips computation
 ```
 
 ## Installation
@@ -62,14 +84,14 @@ pip install -e .   # editable install from source
 
 Requires Python ≥ 3.10.
 
-## Documentation
+## Component Docs
 
-See [`notes_v3.md`](notes_v3.md) for full architecture docs, API reference,
-and examples.
+- **[DataTree](docs/datree.md)** — construction, lazy primitives, inter-record ops, terminal extractors
+- **[Record](docs/record.md)** — payload structure, indexer resolution, get/set/delete/copy/move
+- **[Schema](docs/schema.md)** — type hierarchy, node tree, inference, reconciliation, visualization
+- **[Program](docs/program.md)** — deferred pipelines, row-based caching, FileCache, to_DataTree
+- **[Expr](docs/expr.md)** — expression AST, statement builders, sbo ops, chain/placeholder
 
 ## Project Status
 
-Version 0.2.0 — Active development. Milestones M0–M3 complete (expr builder
-with assign, keep, fork/case fast path, sbo ops, chain/placeholder, callable
-Expr). M4 (general path for fork/case with partition/recombine) deferred
-pending ordering-tiebreak design.
+Version 0.2.0 — Active development. Core modules complete with 140+ tests.
