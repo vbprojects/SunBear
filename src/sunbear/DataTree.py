@@ -187,6 +187,77 @@ class DataTree:
         ix = Record.resolve(indexer)
         return [r.get(indexer) for r, _ in self.scan()]
 
+    def inspect(self, indexer):
+        """Return the inferred Schema of values at *indexer* across all rows.
+
+        The returned Schema is named after the indexer for display purposes.
+        Supports all Record indexer types: str, dotted-str, tuple, list, dict.
+        Also accepts Path/Col nodes from the expr layer.
+
+        Examples
+        --------
+        >>> t = DataTree.from_records([{"a": 1}, {"a": "hi"}])
+        >>> t.inspect("a")
+        Schema(name='a', (a=Union[int, str]))
+        """
+        from .Schema import (
+            Schema, SchemaList, Branch, Leaf, infer_schema,
+            reconcile as _reconcile,
+        )
+
+        # Normalize expr nodes (Path/Col) to their raw indexer string
+        raw = getattr(indexer, "indexer", None)
+        if raw is not None and isinstance(raw, str):
+            indexer = raw
+
+        # Build a display name for the indexer
+        if isinstance(indexer, str):
+            display_name = indexer
+        elif isinstance(indexer, (list, tuple)):
+            display_name = "[" + ", ".join(str(i) for i in indexer) + "]"
+        elif isinstance(indexer, dict):
+            display_name = "{" + ", ".join(str(k) for k in indexer.keys()) + "}"
+        else:
+            display_name = str(indexer)
+
+        # Extract values from all rows at the given indexer
+        values = []
+        for r, _ in self.scan():
+            try:
+                v = r.get(indexer)
+                values.append(v)
+            except (KeyError, TypeError):
+                values.append(None)
+
+        if not values:
+            return Schema(Branch({}), name=display_name)
+
+        # Infer schemas from each extracted value
+        branches: List[Branch] = []
+        for v in values:
+            node = infer_schema(v)
+            if isinstance(node, Branch):
+                branches.append(node)
+            elif isinstance(node, Leaf):
+                scalar_name = display_name.rpartition(".")[2] or display_name
+                branches.append(Branch({scalar_name: node}))
+
+        if not branches:
+            return Schema(Branch({}), name=display_name)
+
+        try:
+            reconciled = _reconcile(branches)
+            return Schema(reconciled, name=display_name)
+        except ValueError:
+            unique_schemas = []
+            for b in branches:
+                if b not in unique_schemas:
+                    unique_schemas.append(b)
+            return SchemaList([
+                Schema(b, name=f"{display_name} (variant {i})")
+                for i, b in enumerate(unique_schemas)
+            ])
+
     def rows(self, **aliases) -> list:
         """Row-wise extraction: ``[{alias: value, ...}, ...]``."""
         out = []

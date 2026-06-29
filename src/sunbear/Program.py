@@ -227,7 +227,13 @@ class Program:
     # ---- execution ----
 
     def __call__(self, dt: "DataTree") -> "DataTree":
-        """Execute the expr pipeline on *dt*, row by row, with caching."""
+        """Execute the expr pipeline on *dt*, row by row, with caching.
+
+        Returns a lazy DataTree backed by a generator — rows are produced
+        on demand as the caller iterates/collects/scans.  This allows
+        ``prog(lazy_dt)`` to stay lazy even when *dt* is a streaming
+        source (e.g. from a WebSocket or file).
+        """
         from .DataTree import DataTree
         from .expr.lower import run_expr
 
@@ -238,35 +244,35 @@ class Program:
             self._cache = cache
 
         stmts = self._statements
-        out_rows: list[dict] = []
 
-        for record, meta in dt.scan():
-            rk = _row_hash(record.data)
-            cached = cache.get(rk)
+        def _iter_output():
+            for record, meta in dt.scan():
+                rk = _row_hash(record.data)
+                cached = cache.get(rk)
 
-            if cached is _FILTERED:
-                # Row was filtered out in a previous run — skip.
-                continue
-            if cached is not None:
-                # Cache hit — use stored output.
-                out_rows.append(cached)
-                continue
+                if cached is _FILTERED:
+                    # Row was filtered out in a previous run — skip.
+                    continue
+                if cached is not None:
+                    # Cache hit — use stored output.
+                    yield dict(cached)
+                    continue
 
-            # Cache miss — run pipeline on a single-row DataTree.
-            single = DataTree.from_records([record.data])
-            result = run_expr(single, *stmts)
-            result_rows = result.collect()
+                # Cache miss — run pipeline on a single-row DataTree.
+                single = DataTree.from_records([record.data])
+                result = run_expr(single, *stmts)
+                result_rows = result.collect()
 
-            if not result_rows:
-                # Row was filtered out by keep/filter.
-                cache.set(rk, None)
-                continue
+                if not result_rows:
+                    # Row was filtered out by keep/filter.
+                    cache.set(rk, None)
+                    continue
 
-            output = result_rows[0]
-            cache.set(rk, output)
-            out_rows.append(output)
+                output = result_rows[0]
+                cache.set(rk, output)
+                yield dict(output)
 
-        return DataTree.from_records(out_rows)
+        return DataTree.from_iter(_iter_output())
 
     # ---- to_DataTree ----
 

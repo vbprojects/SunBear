@@ -225,3 +225,4 @@ src_old/*
 src_old
 .old_src
 .sunbearv2
+*.json

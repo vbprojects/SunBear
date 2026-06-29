@@ -41,8 +41,7 @@ next(jetstream_generator())
 from datetime import datetime, timezone
 from itertools import batched
 import shutil
-import sunbear.ops as sbo
-from sunbear.expr import _, assign, b, keep
+from sunbear.expr import _, assign, b, keep, sbo
 
 start_time = datetime.now(timezone.utc)
 
@@ -87,63 +86,54 @@ class gptd:
         return self.alpha / (self.beta**2)
 from collections import defaultdict
 model = defaultdict(gptd)
+#%%
+batch = next(batched(jetstream_generator(), 100))
+#%%
+dt = DataTree.from_records(batch)
 # %%
-while True:
-    res = (
-        sb.DataTree.from_records(next(batched(jetstream_generator(), 200)))
-        .untracked()
-        .select(
-            facets=b.commit.record.facets,
-            text=b.commit.record.text,
-            createdAt=b.commit.record.createdAt,
-            id=b.commit.cid,
-        )
-        .expr(
-            keep(
-                sbo.length(
-                    sbo.chain(
-                        sbo.flatten(b.facets, -1),
-                        sbo.filter(_, lambda x: isinstance(x, str) and "#tag" in x),
-                    ),
-                )
-                > 0
-            ),
-            b.createdAt(lambda t: datetime.fromisoformat(t)),
-            assign(b.facets, sbo.flatten(b.facets, 3)),
-            b.facets(
-                lambda fs: [f[1] for f in fs if isinstance(f, list) and "#tag" in f[0]]
-            ),
-        )
-        .explode("facets")
-        .col(text=b.text, createdAt=b.createdAt, tag=b.facets, id=b.id)
-    )
-    for tag, createdAt in zip(res["tag"], res["createdAt"]):
-        model[tag].update(createdAt)
-    # get top 10 tags by mean
-    top_tags = sorted(model.items(), key=lambda x: x[1].mean, reverse=True)[:10]
-    # print(f"Top tags at {datetime.now(timezone.utc)}:")
-    # Move cursor up to overwrite previous output
-    print(f"\033[{len(top_tags)}A", end="")
+dt.schema
+# dt.select(facets = b.commit.record.facets).head().pluck(b.facets)
+dt.expr(
+    assign(b.facets, b.commit.record.facets),
+    keep(b.facets != None),
+).head().pluck(b.facets)[0]
+# %%
+dt.schema
+#%%
+dt.expr(
+    assign(b.feats, b.commit.record.facets.features['$type']),
+    keep(b.feats != None),
+    assign(b.feats, sbo.flatten(b.feats))
+).pluck(b.feats)
+# %%
+dt.pluck(b.commit.record.facets.features['$type'])
+#%%
+dt.inspect(b.commit.record.facets.features)
+#%%
+dt.pluck(b.commit.record.createdAt)
+#%%
+dt.schema
+#%%
+from sunbear.Program import Program
+#%%
+prog = Program().expr(
+    assign(b.tags, b.commit.record.facets.features.tag),
+    assign(b.createdAt, b.commit.record.createdAt),
+    keep(b.tags != None),
+    assign(b.tags, sbo.flatten(b.tags)),
+    keep(b.createdAt != None)
+)
+# %%
+dt = DataTree.from_iter(jetstream_generator())
+#%%
+prog(dt)
+#%%
+tag_collector = prog(dt).irows(tags = b.tags, createdAt = b.createdAt)
+#%%
+next(tag_collector)
+# %%
+dt = DataTree.from_iter(jetstream_generator())
+prog(dt)
 
-    cols = shutil.get_terminal_size().columns
-    from IPython.display import clear_output
-    msg = ""
-    for tag, m in top_tags:
-        line = f"  {tag}: mean={m.mean:.2f}, variance={m.variance:.2f}"
-        msg += line.ljust(cols) + "\n"
-    clear_output(wait=True)
-    print(msg)
-# %%
-import time
-
-for i in range(11):
-    # \r resets cursor, end="" prevents new lines, flush=True updates instantly
-    print(f"\rProgress: {i*10}%", end="", flush=True)
-    time.sleep(0.5)
-print("\nDone!")
-# %%
-for tag, m in model.items():
-    print(f"{tag}: mean={m.mean:.2f}, variance={m.variance:.2f}, total count = {m.alpha:.0f}")
-# %%
-model["ai"].times
-# %%
+#%%
+prog.to_DataTree()

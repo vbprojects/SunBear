@@ -111,9 +111,24 @@ class Record:
         - "get": returns leaf value, or None if missing or node not a dict
         - "set": creates intermediate dicts as needed, assigns value at leaf
         - "delete": pops leaf, no-op if missing
+
+        Lists are transparently traversed: when the walker encounters a list
+        at an intermediate position in the path (e.g. ``facets.features``
+        where ``facets`` is a list of dicts), it walks each list element
+        with the remaining path and collects the results into a list.
         """
         if not path:
             return node if action == "get" else None
+        # --- list transparency: walk into each element ---
+        if isinstance(node, list):
+            if action == "get":
+                results = []
+                for item in node:
+                    r = Record._walk(item, path, action, value)
+                    if r is not None:
+                        results.append(r)
+                return results if results else None
+            return None
         if not isinstance(node, dict):
             return None if action == "get" else None
         for k, sub in path.items():
