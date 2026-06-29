@@ -222,3 +222,6 @@ __marimo__/
 src_old/*
 .old_src/*
 .sunbearv2/*
+src_old
+.old_src
+.sunbearv2
