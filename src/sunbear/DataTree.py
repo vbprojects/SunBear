@@ -354,6 +354,54 @@ class DataTree:
     def head(self, n: int = 5) -> "DataTree":
         return self.take(0, n)
 
+    def explode(self, indexer) -> "DataTree":
+        """Explode a list field into one row per element.
+
+        For each row, the value at *indexer* is replaced by each of its
+        elements in turn, producing N output rows for a list of length N.
+        All other fields are shallow-copied per output row.  Non-list values
+        pass through unchanged.
+
+        Parameters
+        ----------
+        indexer : Any
+            Any value accepted by ``Record.resolve`` (dotted string, dict,
+            tuple, list, or expr ``Path``/``Col``).
+
+        Returns
+        -------
+        DataTree
+            A new lazy DataTree (generator-backed).
+
+        Examples
+        --------
+        >>> dt = DataTree.from_records([
+        ...     {"name": "Alice", "tags": ["a", "b"]},
+        ...     {"name": "Bob",   "tags": ["c"]},
+        ... ])
+        >>> dt.explode("tags").collect()
+        [{'name': 'Alice', 'tags': 'a'}, {'name': 'Alice', 'tags': 'b'}, {'name': 'Bob', 'tags': 'c'}]
+        """
+        ix = Record.resolve(indexer)
+        root = next(iter(ix)) if ix else None
+        roots = [root] if root else None
+
+        def gen():
+            for r, m in self.scan():
+                val = r.get(indexer)
+                if isinstance(val, list):
+                    for elem in val:
+                        # Deep-copy the branch containing the list so that
+                        # nested dicts (e.g. profile.emails) are not shared
+                        # across iterations.
+                        new_data = copy.deepcopy(r.data)
+                        Record._walk(new_data, ix, "set", elem)
+                        yield Record(new_data, dict(m)), dict(m)
+                else:
+                    yield Record(dict(r.data), dict(m)), dict(m)
+
+        return DataTree(gen())
+
     def tail(self, n: int = 5) -> "DataTree":
         """Last n rows — needs full materialization."""
         materialized = self._materialize()

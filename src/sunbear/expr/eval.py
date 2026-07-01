@@ -182,3 +182,10 @@ register_func("reduce", _reduce_value)
 register_func("length", _length_value)
 register_func("size", _length_value)
 register_func("count", _length_value)
+
+# Sugar ops used by cast/upper/lower/trim/round_field
+register_func("__upper", lambda v: v.upper() if isinstance(v, str) else v)
+register_func("__lower", lambda v: v.lower() if isinstance(v, str) else v)
+register_func("__trim", lambda v: v.strip() if isinstance(v, str) else v)
+register_func("__round", lambda v, ndigits=0: round(v, ndigits))
+register_func("__cast", lambda v, type=None: type(v) if type is not None else v)

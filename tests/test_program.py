@@ -63,9 +63,10 @@ class TestExprPipeline(unittest.TestCase):
         dt = _sample_dt()
         prog = Program(name="t_assign").expr(assign(b.status, "active"))
         result = prog(dt)
-        for row in result.collect():
+        rows = result.collect()
+        self.assertEqual(len(rows), 3)
+        for row in rows:
             self.assertEqual(row["status"], "active")
-        self.assertEqual(len(result), 3)
 
     def test_keep_filters_rows(self):
         dt = _sample_dt()
@@ -119,38 +120,41 @@ class TestRowCache(unittest.TestCase):
     def test_cache_hit_same_data(self):
         dt = _sample_dt()
         prog = Program(name="hit").expr(assign(b.status, "ok"))
-        r1 = prog(dt)
-        r2 = prog(dt)
-        self.assertEqual(r1.collect(), r2.collect())
+        r1 = prog(dt).collect()
+        # Need fresh DataTree since generator was consumed
+        dt2 = _sample_dt()
+        r2 = prog(dt2).collect()
+        self.assertEqual(r1, r2)
 
     def test_cache_miss_new_row(self):
         """Add a new row between calls — it should be computed, not skipped."""
         dt1 = DataTree.from_records([{"x": 1}, {"x": 2}])
         prog = Program(name="miss").expr(assign(b.tag, "v"))
-        r1 = prog(dt1)
+        r1 = prog(dt1).collect()
         self.assertEqual(len(r1), 2)
 
         dt2 = DataTree.from_records([{"x": 1}, {"x": 2}, {"x": 3}])
-        r2 = prog(dt2)
+        r2 = prog(dt2).collect()
         self.assertEqual(len(r2), 3)
-        tags = [r["tag"] for r in r2.collect()]
+        tags = [r["tag"] for r in r2]
         self.assertEqual(tags, ["v", "v", "v"])
 
     def test_filtered_rows_cached(self):
         dt = _sample_dt()
         prog = Program(name="filt").expr(keep(b.age >= 18))
-        r1 = prog(dt)
+        r1 = prog(dt).collect()
         self.assertEqual(len(r1), 2)
         # Second call: Bob still filtered, Alice & Carol still pass
-        r2 = prog(dt)
+        dt2 = _sample_dt()
+        r2 = prog(dt2).collect()
         self.assertEqual(len(r2), 2)
-        names = [r["name"] for r in r2.collect()]
+        names = [r["name"] for r in r2]
         self.assertEqual(names, ["Alice", "Carol"])
 
     def test_filecache_persists(self):
         dt = _sample_dt()
         prog = Program(name="persist").expr(assign(b.z, 99))
-        prog(dt)
+        prog(dt).collect()  # must collect to populate cache
         # New program with same name — should load existing cache
         prog2 = Program(name="persist").expr(assign(b.z, 99))
         r2 = prog2(dt)
@@ -175,7 +179,8 @@ class TestToDataTree(unittest.TestCase):
     def test_round_trip(self):
         dt = _sample_dt()
         prog = Program(name="rt").expr(assign(b.status, "ok"))
-        prog(dt)
+        rows = prog(dt).collect()  # must collect to populate cache
+        self.assertEqual(len(rows), 3)
         loaded = prog.to_DataTree()
         self.assertEqual(len(loaded), 3)
         for row in loaded.collect():
@@ -211,13 +216,13 @@ class TestCustomCache(unittest.TestCase):
         dt = _sample_dt()
         cache = FileCache("my_prog")
         prog = Program(cache=cache).expr(assign(b.x, 1))
-        prog(dt)
+        prog(dt).collect()  # must collect to populate cache
         self.assertTrue(os.path.exists(os.path.join(_CACHE_DIR, "my_prog.json")))
 
     def test_custom_name_creates_default_cache(self):
         dt = _sample_dt()
         prog = Program(name="custom").expr(assign(b.x, 1))
-        prog(dt)
+        prog(dt).collect()  # must collect to populate cache
         self.assertTrue(os.path.exists(os.path.join(_CACHE_DIR, "custom.json")))
 
 
@@ -234,7 +239,7 @@ class TestImmutability(unittest.TestCase):
             assign(b.status, "ok"),
             keep(b.age >= 18),
         )
-        prog(dt)
+        prog(dt).collect()  # must collect to execute pipeline
         self.assertEqual(dt.collect(), original)
 
 

@@ -40,6 +40,41 @@ result = prog(dt)   # cache miss — executes pipeline
 result = prog(dt)   # cache hit — skips computation
 ```
 
+### Streaming Source (Lazy Execution)
+
+`prog(dt)` returns a lazy DataTree — the pipeline runs on demand as the
+caller pulls rows. This works with any iterable source (WebSocket, file, etc.):
+
+```python
+from sunbear.expr import select, sbo
+
+prog = Program().expr(
+    *select(b.author, tags=b.commit.record.tags, createdAt=b.commit.record.createdAt),
+    keep(b.tags != None),
+    assign(b.tags, sbo.flatten(b.tags)),
+)
+
+dt = DataTree.from_iter(jetstream_generator())
+result = prog(dt)          # nothing consumed yet — lazy generator
+
+# Pull rows on demand:
+for row in result.irows(tags=b.tags, createdAt=b.createdAt):
+    print(row)
+    break                  # only one row pulled from the stream
+```
+
+### Keyword `assign` Sugar
+
+```python
+prog = Program().expr(
+    assign(tags=b.commit.record.tags, createdAt=b.commit.record.createdAt),
+    keep(b.tags != None),
+)
+# equivalent to:
+# assign(b.tags, b.commit.record.tags),
+# assign(b.createdAt, b.commit.record.createdAt),
+```
+
 ### Pipe Syntax
 
 ```python
@@ -148,20 +183,25 @@ data = cache.get("abc123")  # {"name": "Alice", "tier": "standard"}
 
 ## Execution Flow
 
-When `prog(dt)` is called:
+When `prog(dt)` is called, a **lazy** DataTree backed by a generator is
+returned — rows are produced on demand as the caller iterates/collects/scans.
+This means streaming sources (WebSocket generators, file readers, etc.) stay
+lazy: each row is processed only when the downstream consumer pulls it.
 
-1. Resolve cache (lazily creates `FileCache` if none provided)
-2. For each `(record, meta)` in the DataTree:
-   - Hash `record.data` to get `row_key`
-   - Check cache:
-     - `_FILTERED` → skip row
-     - `dict` → cache hit, append to output
-     - `None` → cache miss:
-       1. Wrap in single-row DataTree
-       2. Run full expr pipeline
-       3. If result empty → cache as `null` (filtered)
-       4. Else → cache output dict, append to output
-3. Return `DataTree.from_records(out_rows)` (re-traversable)
+For each `(record, meta)` yielded by the input DataTree:
+
+1. Hash `record.data` to get `row_key`
+2. Check cache:
+   - `_FILTERED` → skip row
+   - `dict` → cache hit, yield stored output
+   - `None` → cache miss:
+     1. Wrap in single-row DataTree
+     2. Run full expr pipeline
+     3. If result empty → cache as `null` (filtered)
+     4. Else → cache output dict, yield it
+
+The returned DataTree is itself lazy (`from_iter`), so chaining operations
+like `.irows()`, `.pluck()`, `.collect()` will stream incrementally.
 
 ---
 

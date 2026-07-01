@@ -124,6 +124,10 @@ class Path(Expr):
             return Path(f"{self.indexer}.{key}" if self.indexer else key)
         return Path(f"{self.indexer}[{key}]" if self.indexer else str(key))
 
+    def __ior__(self, value) -> tuple:
+        """b.x |= expr  →  assign(b.x, expr)  (returns a statement tuple)."""
+        return ("assign", self, _wrap(value))
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # LazyNamespace — ``b`` entry point (small wrapper, returns Path instances)
