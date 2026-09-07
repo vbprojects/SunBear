@@ -44,7 +44,6 @@ caching, and type-level schema inference into a lightweight, composable toolkit.
 ```python
 import sunbear as sb
 from sunbear.expr import b, assign, keep, sbo
-import numpy as np
 
 records = [
     {"name": "Alice", "age": 30, "tags": [["ring"], ["gold"]]},
@@ -63,7 +62,7 @@ dt2 = dt.expr(
 
 print(dt2.collect())
 # [{'name': 'Alice', 'age': 30, 'tags': [...], 'status': 'active', 'flat_tags': ['ring', 'gold']},
-#  {'name': 'Carol', 'age': 25, 'tags': [...], 'status': 'active', 'flat_tags': ['silver', 'bronze']}]
+#  {'name': 'Bob', 'age': 25, 'tags': [], 'status': 'active', 'flat_tags': []}]
 
 # Program (deferred with caching)
 from sunbear import Program

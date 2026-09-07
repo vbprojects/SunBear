@@ -173,22 +173,22 @@ class TestUnnest(unittest.TestCase):
 
 class TestAssert(unittest.TestCase):
 
-    def test_assert_filters(self):
+    def test_assert_raises_with_default_message(self):
         dt = _sample_dt()
         r = dt.expr(assert_(b.age >= 18))
-        rows = r.collect()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["name"], "Alice")
+        with self.assertRaisesRegex(ValueError, "SunBear assertion failed"):
+            r.collect()
 
     def test_assert_passes_all(self):
         dt = _sample_dt()
         r = dt.expr(assert_(b.age >= 0))
         self.assertEqual(len(r.collect()), 2)
 
-    def test_assert_filters_all(self):
+    def test_assert_raises_on_first_failure(self):
         dt = _sample_dt()
         r = dt.expr(assert_(b.age >= 100))
-        self.assertEqual(len(r.collect()), 0)
+        with self.assertRaisesRegex(ValueError, "SunBear assertion failed"):
+            r.collect()
 
     def test_assert_with_message(self):
         dt = _sample_dt()
@@ -354,9 +354,8 @@ class TestIntegration(unittest.TestCase):
             default(b.score, 0),
             assert_(b.score >= 50),
         )
-        rows = r.collect()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["name"], "Bob")
+        with self.assertRaisesRegex(ValueError, "SunBear assertion failed"):
+            r.collect()
 
     def test_nest_then_unnest_roundtrip(self):
         dt = _sample_dt()
@@ -445,8 +444,8 @@ class TestProgramCompatibility(unittest.TestCase):
         prog = Program(name="t_assert").expr(
             assert_(b.age >= 18),
         )
-        rows = prog(dt).collect()
-        self.assertEqual(len(rows), 1)
+        with self.assertRaisesRegex(ValueError, "SunBear assertion failed"):
+            prog(dt).collect()
 
     def test_program_with_sugar_ops(self):
         dt = _sample_dt()

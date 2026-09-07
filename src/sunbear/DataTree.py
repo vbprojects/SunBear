@@ -493,6 +493,11 @@ class DataTree:
         Builds an index over ``right`` (smaller side assumption) and streams
         the left rows. Records are merged by reference where possible.
         """
+        if how not in {"inner", "left"}:
+            raise ValueError(
+                f"unsupported join mode {how!r}; expected 'inner' or 'left'"
+            )
+
         # build right index
         right_plan = Plan.build(
             ((Record(dict(r), {}), {}) for r in right),
@@ -504,7 +509,7 @@ class DataTree:
             lk = _freeze(lr.get(on))
             matches = right_plan.index.get(lk, [])
             if not matches:
-                if how != "inner":
+                if how == "left":
                     out.append(dict(lr.data))
                 continue
             for rr in matches:
@@ -625,4 +630,3 @@ class DataTree:
         if callable(fn):
             return fn(self)
         return NotImplemented
-

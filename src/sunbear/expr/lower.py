@@ -15,7 +15,7 @@ Statements are tuples:
   ("default", target, value)     → dt.apply(default_fn) — set if None
   ("nest", (paths...,), into)    → dt.apply(nest_fn) — group fields
   ("unnest", path)               → dt.apply(unnest_fn) — flatten nested dict
-  ("assert", pred, message)      → dt.filter(check_fn) — filter or raise
+  ("assert", pred, message)      → dt.filter(check_fn) — raise on failure
   ("mask", target, pred, value)  → dt.apply(mask_fn) — conditional set
   ("coalesce", (paths...,), target) → dt.apply(coalesce_fn) — first non-None
 
@@ -35,7 +35,7 @@ Statement builders:
   default(target, value)         — set if None
   nest(*paths, into=)            — group fields into nested dict
   unnest(path)                   — flatten nested dict
-  assert_(pred, message=None)    — filter or raise on bad rows
+  assert_(pred, message=None)    — raise on bad rows
   mask(target, pred, value)      — conditional set
   cast(target, type_)            — type coercion
   upper(target)                  — uppercase string
@@ -201,10 +201,9 @@ def unnest(path):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def assert_(pred, message=None):
-    """Skip rows where *pred* is falsy (or raise if *message* is given).
+    """Raise ``ValueError`` when *pred* is falsy.
 
-    Without *message*: rows that fail the predicate are silently filtered.
-    With *message*: raises ``ValueError`` on the first failing row.
+    Use :func:`keep` when failing rows should be filtered instead.
     """
     return ("assert", _wrap(pred), message)
 
@@ -402,13 +401,12 @@ def _lower(stmt, dt):
     if kind == "assert":
         _, pred, message = stmt
         f = compile(pred)
-        if message:
-            def _check(r, m, _f=f, _msg=message):
-                if not bool(_f(r)):
-                    raise ValueError(_msg)
-                return True
-            return dt.filter(_check)
-        return dt.filter(lambda r, m, _f=f: bool(_f(r)))
+        error_message = message or "SunBear assertion failed"
+        def _check(r, m, _f=f, _msg=error_message):
+            if not bool(_f(r)):
+                raise ValueError(_msg)
+            return True
+        return dt.filter(_check)
 
     if kind == "mask":
         _, target, pred, value = stmt

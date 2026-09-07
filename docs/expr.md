@@ -266,12 +266,13 @@ unnest(b.address)
 
 ### `assert_(pred, message=None)` — Conditional
 
-Filter rows where predicate is falsy. With `message`, raises `ValueError`
-on the first failing row (useful for data validation):
+Raise `ValueError` on the first row where the predicate is falsy. The optional
+message replaces the default error text. Use `keep()` to filter rows:
 
 ```python
-assert_(b.age >= 18)                    # silently drop underage rows
-assert_(b.age >= 0, "negative age")     # raise on bad data
+assert_(b.age >= 18)                    # raise with a default message
+assert_(b.age >= 0, "negative age")     # raise with a custom message
+keep(b.age >= 18)                       # filter underage rows
 ```
 
 ### `mask(target, pred, value)` — Conditional

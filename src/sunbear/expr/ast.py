@@ -27,6 +27,12 @@ class Expr:
 
     __hash__ = None
 
+    def __bool__(self):
+        raise TypeError(
+            "SunBear expressions cannot be converted to bool. "
+            "Combine predicates with &, |, and ~, using parentheses."
+        )
+
     # arithmetic
     def __add__(self, other):  return BinOp("+", self, _wrap(other))
     def __radd__(self, other): return BinOp("+", _wrap(other), self)
