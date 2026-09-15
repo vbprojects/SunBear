@@ -8,6 +8,7 @@ Two halves:
 from __future__ import annotations
 from typing import Any, Callable
 
+from ..paths import MISSING
 from .ast import Expr, Lit, Col, BinOp, UnOp, Call, Path, Placeholder
 
 
@@ -58,20 +59,25 @@ def compile(node: Expr):
         return lambda r: v
     if isinstance(node, Col):
         ix = node.indexer
-        return lambda r: r.get(ix)
+        return lambda r: r.get(ix, MISSING)
     if isinstance(node, Path):
         ix = node.indexer
-        return lambda r: r.get(ix)
+        return lambda r: r.get(ix, MISSING)
     if isinstance(node, BinOp):
         L = compile(node.left)
         R = compile(node.right)
         op = OPS[node.op]
+        if node.op == "&":
+            return lambda r: bool(L(r)) and bool(R(r))
+        if node.op == "|":
+            return lambda r: bool(L(r)) or bool(R(r))
         return lambda r: op(L(r), R(r))
     if isinstance(node, UnOp):
         operand = compile(node.operand)
         op = OPS[node.op]
         return lambda r: op(operand(r))
     if isinstance(node, Call):
+        implementation = FUNCS[node.name]
         A = [compile(a) for a in node.args]
         K = {k: compile(v) for k, v in node.kwargs.items()}
         # Ops that need the record itself (for metadata side-effects).
@@ -79,14 +85,14 @@ def compile(node: Expr):
         _RECORD_AWARE = {"filter"}
         if node.name in _RECORD_AWARE:
             def closure(r, _A=A, _K=K, _name=node.name):
-                return FUNCS[_name](
+                return implementation(
                     *[a(r) for a in _A],
                     r,
                     **{k: v(r) for k, v in _K.items()},
                 )
             return closure
         def closure(r, _A=A, _K=K, _name=node.name):
-            return FUNCS[_name](
+            return implementation(
                 *[a(r) for a in _A],
                 **{k: v(r) for k, v in _K.items()},
             )
@@ -100,7 +106,7 @@ def compile(node: Expr):
 # Intra-record ops (sbo.*) — operate on values within a single record
 # ═══════════════════════════════════════════════════════════════════════════
 
-_MISSING = object()
+_MISSING = MISSING
 
 
 def _coerce_list(v):
@@ -189,3 +195,10 @@ register_func("__lower", lambda v: v.lower() if isinstance(v, str) else v)
 register_func("__trim", lambda v: v.strip() if isinstance(v, str) else v)
 register_func("__round", lambda v, ndigits=0: round(v, ndigits))
 register_func("__cast", lambda v, type=None: type(v) if type is not None else v)
+
+register_func("exists", lambda v: v is not MISSING)
+register_func("is_null", lambda v: v is None)
+register_func("is_not_null", lambda v: v is not None and v is not MISSING)
+register_func("fill_missing", lambda v, default: default if v is MISSING else v)
+
+BUILTIN_FUNCS = dict(FUNCS)

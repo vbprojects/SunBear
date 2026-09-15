@@ -127,3 +127,45 @@ Converts a dotted string to a nested-dict path:
 ### `_deep_merge(dst, src) -> dict`
 Recursively merges src into dst in-place. Used by tuple/list indexers to
 combine multiple paths.
+
+## Structured paths and missing values (0.3)
+
+Expression paths store typed Key, Index, and Traverse segments. Legacy dotted
+strings still address nested fields, and dict/list/tuple indexers remain
+accepted by Record.resolve(). Use bracket syntax for literal keys and method
+name collisions:
+
+```python
+from sunbear import Record, MISSING
+from sunbear.expr import b
+
+r = Record({"literal.key": [{"price": None}, {"price": 7}]})
+assert r.get(b["literal.key"][-1].price) == 7
+assert r.get(b["literal.key"][0].price) is None
+assert r.get(b["literal.key"][9], MISSING) is MISSING
+```
+
+Integer indices support Python negative indices. Out-of-range reads are
+missing; writes raise IndexError and never extend arrays implicitly.
+b.items[...].price explicitly traverses a list; b.items.price retains implicit
+list traversal. Traversal preserves nulls and empty collections but omits
+missing matches. Thus traversing an empty list returns [], and [{x: null}, {}]
+produces [null]. Traversal results are not position-aligned with missing items.
+
+Record.get(path) retains the legacy None default; pass MISSING explicitly to
+distinguish absence. Expression evaluation retains MISSING automatically.
+exists() tests presence (including null), is_null() tests explicit null,
+is_not_null() tests present non-null values, and fill_missing(value) replaces
+absence only. Use these instead of comparing with None when absence matters.
+Boolean expression & and | short-circuit, allowing guarded missing access.
+
+Move/copy preserve explicit null. add() fills only absence. default() retains
+its legacy missing-or-null fallback; fill_missing() is the precise alternative.
+Missing output object fields are omitted; missing array positions raise.
+
+Record is mutable at the root. Declarative writes copy modified ancestor
+containers and assigned values so deep updates do not mutate source/sibling
+branches. Untouched containers remain shared; direct dict mutation bypasses
+this guarantee. branch_map callbacks deeply copy declared roots, and must not
+mutate undeclared roots. Whole-record map callbacks retain their explicit
+mutable Record interface.

@@ -468,7 +468,7 @@ class TestExprPipeline(unittest.TestCase):
     def test_path_attribute_access(self):
         dt = DataTree.from_records([{"a": {"b": {"c": 42}}}])
         # verify path binding
-        self.assertEqual(b.a.b.c.indexer, "a.b.c")
+        self.assertEqual(Record({"a": {"b": {"c": 1}}}).get(b.a.b.c), 1)
         # use in expr
         dt2 = dt.expr(assign(b.doubled, b.a.b.c * 2))
         first = next(dt2.scan())[0].data

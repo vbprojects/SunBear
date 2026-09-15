@@ -420,24 +420,24 @@ class DataTree:
         return self._derive(gen)
 
     def branch_map(self, roots, fn: Callable[[Record], None]) -> "DataTree":
-        """Apply ``fn(record)`` to each row in-place on a shallow copy.
+        """Apply ``fn(record)`` with deep isolation of declared roots.
 
         ``roots`` is an iterable of top-level field names that ``fn`` may
         touch — used by callers like ``set``/``move`` to know which branches
-        to copy. For the lazy backbone we copy the whole data dict (cheap,
-        and records are mutable per design).
+        to copy. Declared roots are deeply copied because arbitrary callback writes cannot
+        be intercepted. With no roots, the entire payload is copied.
         """
         roots = list(roots) if roots else None
         def gen():
             for r, m in self.scan():
                 if roots is None:
-                    new = Record(dict(r.data), dict(m))
+                    new = Record(copy.deepcopy(r.data), dict(m))
                 else:
-                    # shallow copy each declared root, leave others shared
+                    # Deep-copy callback roots; undeclared roots remain shared.
                     new_data = {}
                     for k, v in r.data.items():
                         if k in roots:
-                            new_data[k] = copy.copy(v)
+                            new_data[k] = copy.deepcopy(v)
                         else:
                             new_data[k] = v
                     new = Record(new_data, dict(m))
@@ -523,33 +523,42 @@ class DataTree:
     def keep(self, pred: Callable[[Record, dict], bool]) -> "DataTree":
         return self.filter(pred)
 
+    def _edit(self, fn):
+        """Declarative writes copy ancestors via Record's walker."""
+        def rows():
+            for r, m in self.scan():
+                result = Record(dict(r.data), copy.deepcopy(m))
+                fn(result)
+                yield result, result.meta
+        return self._derive(rows)
+
     def assign_at(self, path, fn: Callable[[Record], Any]) -> "DataTree":
         """Set ``fn(record)`` at ``path`` on every row."""
         ix = Record.resolve(path)
         root = next(iter(ix)) if ix else None
         roots = [root] if root else None
-        return self.branch_map(roots, lambda r: r.set(path, fn(r)))
+        return self._edit(lambda r: r.set(path, fn(r)))
 
     def set(self, indexer, value) -> "DataTree":
         ix = Record.resolve(indexer)
         roots = list(ix.keys())
-        return self.branch_map(roots, lambda r: r.set(indexer, value))
+        return self._edit(lambda r: r.set(indexer, value))
 
     def add(self, indexer, value) -> "DataTree":
         ix = Record.resolve(indexer)
         roots = list(ix.keys())
         def fn(r):
-            if r.get(indexer) is None:
+            if indexer not in r:
                 r.set(indexer, value)
-        return self.branch_map(roots, fn)
+        return self._edit(fn)
 
     def move(self, src, dst) -> "DataTree":
         s, d = Record.resolve(src), Record.resolve(dst)
-        return self.branch_map(list(s) + list(d), lambda r: r.mv(src, dst))
+        return self._edit(lambda r: r.mv(src, dst))
 
     def copy(self, src, dst) -> "DataTree":
         s, d = Record.resolve(src), Record.resolve(dst)
-        return self.branch_map(list(s) + list(d), lambda r: r.cpy(src, dst))
+        return self._edit(lambda r: r.cpy(src, dst))
 
     def drop(self, *indexers) -> "DataTree":
         """Remove fields by path."""
@@ -558,7 +567,7 @@ class DataTree:
         def fn(r):
             for ix in resolved:
                 r._walk(r.data, ix, "delete")
-        return self.branch_map(roots, fn)
+        return self._edit(fn)
 
     def rename(self, **mapping) -> "DataTree":
         """Rename fields: ``tree.rename(old_name="new_name")``."""

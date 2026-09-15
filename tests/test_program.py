@@ -119,7 +119,7 @@ class TestRowCache(unittest.TestCase):
 
     def test_cache_hit_same_data(self):
         dt = _sample_dt()
-        prog = Program(name="hit").expr(assign(b.status, "ok"))
+        prog = Program(name="hit", cache=FileCache("hit")).expr(assign(b.status, "ok"))
         r1 = prog(dt).collect()
         # Need fresh DataTree since generator was consumed
         dt2 = _sample_dt()
@@ -129,7 +129,7 @@ class TestRowCache(unittest.TestCase):
     def test_cache_miss_new_row(self):
         """Add a new row between calls — it should be computed, not skipped."""
         dt1 = DataTree.from_records([{"x": 1}, {"x": 2}])
-        prog = Program(name="miss").expr(assign(b.tag, "v"))
+        prog = Program(name="miss", cache=FileCache("miss")).expr(assign(b.tag, "v"))
         r1 = prog(dt1).collect()
         self.assertEqual(len(r1), 2)
 
@@ -141,7 +141,7 @@ class TestRowCache(unittest.TestCase):
 
     def test_filtered_rows_cached(self):
         dt = _sample_dt()
-        prog = Program(name="filt").expr(keep(b.age >= 18))
+        prog = Program(name="filt", cache=FileCache("filt")).expr(keep(b.age >= 18))
         r1 = prog(dt).collect()
         self.assertEqual(len(r1), 2)
         # Second call: Bob still filtered, Alice & Carol still pass
@@ -153,10 +153,10 @@ class TestRowCache(unittest.TestCase):
 
     def test_filecache_persists(self):
         dt = _sample_dt()
-        prog = Program(name="persist").expr(assign(b.z, 99))
+        prog = Program(name="persist", cache=FileCache("persist")).expr(assign(b.z, 99))
         prog(dt).collect()  # must collect to populate cache
         # New program with same name — should load existing cache
-        prog2 = Program(name="persist").expr(assign(b.z, 99))
+        prog2 = Program(name="persist", cache=FileCache("persist")).expr(assign(b.z, 99))
         r2 = prog2(dt)
         for row in r2.collect():
             self.assertEqual(row["z"], 99)
@@ -178,7 +178,7 @@ class TestToDataTree(unittest.TestCase):
 
     def test_round_trip(self):
         dt = _sample_dt()
-        prog = Program(name="rt").expr(assign(b.status, "ok"))
+        prog = Program(name="rt", cache=FileCache("rt")).expr(assign(b.status, "ok"))
         rows = prog(dt).collect()  # must collect to populate cache
         self.assertEqual(len(rows), 3)
         loaded = prog.to_DataTree()
@@ -192,9 +192,9 @@ class TestToDataTree(unittest.TestCase):
             prog.to_DataTree()
 
     def test_empty_cache_raises(self):
-        prog = Program(name="empty")
+        prog = Program(name="empty", cache=FileCache("empty"))
         # Never called — cache is empty (file not even created)
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(ValueError):
             prog.to_DataTree()
 
 
@@ -219,11 +219,11 @@ class TestCustomCache(unittest.TestCase):
         prog(dt).collect()  # must collect to populate cache
         self.assertTrue(os.path.exists(os.path.join(_CACHE_DIR, "my_prog.json")))
 
-    def test_custom_name_creates_default_cache(self):
+    def test_name_is_only_a_label(self):
         dt = _sample_dt()
         prog = Program(name="custom").expr(assign(b.x, 1))
         prog(dt).collect()  # must collect to populate cache
-        self.assertTrue(os.path.exists(os.path.join(_CACHE_DIR, "custom.json")))
+        self.assertFalse(os.path.exists(os.path.join(_CACHE_DIR, "custom.json")))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -1,49 +1,4 @@
-"""lower.py — lower expr statements (tuples) to DataTree operations.
-
-Statements are tuples:
-  ("assign", path, expr)         → dt.assign_at(path, compile(expr))
-  ("keep", pred)                 → dt.filter(lambda r, m: bool(compile(pred)(r)))
-  ("filter", path, pred_expr)    → intra-record lazy filter via sbo.filter
-  ("map", path, fn_expr)         → intra-record sbo.map
-  ("flatten", path, level)       → intra-record sbo.flatten
-  ("fork", cond, then_stmts, else_stmts) → dt.apply(branch_fn)
-  ("case", clauses, default)     → dt.apply(case_fn)
-  ("project", (key, ...))        → dt.apply(project_fn) — drop unselected fields
-  ("rename", src, dst)           → dt.rename(src.indexer=dst.indexer)
-  ("drop", (path, ...))          → dt.drop(*paths)
-  ("copy", src, dst)             → dt.copy(src, dst)
-  ("default", target, value)     → dt.apply(default_fn) — set if None
-  ("nest", (paths...,), into)    → dt.apply(nest_fn) — group fields
-  ("unnest", path)               → dt.apply(unnest_fn) — flatten nested dict
-  ("assert", pred, message)      → dt.filter(check_fn) — raise on failure
-  ("mask", target, pred, value)  → dt.apply(mask_fn) — conditional set
-  ("coalesce", (paths...,), target) → dt.apply(coalesce_fn) — first non-None
-
-Statement builders:
-  assign(target, value)          — single assign (positional)
-  assign(key=value, ...)         — keyword sugar (multiple assigns)
-  keep(pred)
-  filter_field(target, pred)
-  map_field(target, fn)
-  flatten(target, level=-1)
-  fork(cond, then_block, else_block)
-  case(*clauses, default=())
-  select(*args, **kwargs)        — project/rename, returns list of stmts
-  rename(**mapping)               — move fields, returns list of stmts
-  drop(*paths)                   — remove fields
-  copy_field(src, dst)           — duplicate field
-  default(target, value)         — set if None
-  nest(*paths, into=)            — group fields into nested dict
-  unnest(path)                   — flatten nested dict
-  assert_(pred, message=None)    — raise on bad rows
-  mask(target, pred, value)      — conditional set
-  cast(target, type_)            — type coercion
-  upper(target)                  — uppercase string
-  lower_str(target)              — lowercase string
-  trim(target)                   — strip whitespace
-  round_field(target, ndigits)   — round numeric field
-  coalesce(*paths, target=)      — first non-None value
-"""
+"""Statement builders and a shared compiled row-local executor."""
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
@@ -126,7 +81,7 @@ def select(*args, **kwargs):
         p = _wrap(path_expr)
         # Extract the top-level key from the path.
         if isinstance(p, Path):
-            top = p.indexer.split(".")[0]
+            top = p.indexer.segments[0].value
         else:
             raise TypeError(f"select: positional args must be paths, got {p!r}")
         keep_keys.append(top)
@@ -256,289 +211,196 @@ def coalesce(*paths, target):
         t = t.indexer
     elif hasattr(t, "indexer"):
         t = t.indexer
-    return ("coalesce", tuple(_wrap(p) for p in paths), str(t))
+    return ("coalesce", tuple(_wrap(p) for p in paths), t)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Lower a single statement to a DataTree method call
-# ═══════════════════════════════════════════════════════════════════════════
 
-def _lower(stmt, dt):
-    kind = stmt[0]
-
-    if kind == "assign":
-        _, path, value = stmt
-        return dt.assign_at(path, _fn_for(value))
-
-    if kind == "keep":
-        _, pred = stmt
-        f = compile(pred)
-        return dt.filter(lambda r, m, _f=f: bool(_f(r)))
-
-    if kind == "filter":
-        # intra-record: just call the value (filter registers skip in meta)
-        path, pred = stmt[1], stmt[2]
-        f_pred = compile(pred)
-        def _row_fn(r, _f=f_pred, _p=path):
-            cur = r.get(_p)
-            from .eval import FUNCS, _MISSING
-            return FUNCS["filter"](cur, _f, r)
-        return dt.assign_at(path, _row_fn)
-
-    if kind == "map":
-        path, fn = stmt[1], stmt[2]
-        f_fn = compile(fn)
-        def _row_fn(r, _f=f_fn, _p=path):
-            from .eval import FUNCS
-            return FUNCS["map"](r.get(_p), _f)
-        return dt.assign_at(path, _row_fn)
-
-    if kind == "flatten":
-        path, level = stmt[1], stmt[2]
-        f_level = compile(level)
-        def _row_fn(r, _f=f_level, _p=path):
-            from .eval import FUNCS
-            return FUNCS["flatten"](r.get(_p), _f(r))
-        return dt.assign_at(path, _row_fn)
-
-    if kind == "fork":
-        _, cond, then_block, else_block = stmt
-        f_cond = compile(cond)
-        # Build per-row branch fn that produces a new record.
-        from ..Record import Record
-        def _row_fn(r):
-            nr = Record(dict(r.data), dict(r.meta))
-            block = then_block if bool(f_cond(r)) else else_block
-            for s in block:
-                _apply_to_record(nr, s)
-            return nr
-        return dt.apply(_row_fn)
-
-    if kind == "case":
-        _, clauses, default = stmt
-        compiled = [(compile(c), b) for c, b in clauses]
-        from ..Record import Record
-        def _row_fn(r):
-            nr = Record(dict(r.data), dict(r.meta))
-            for f_cond, block in compiled:
-                if bool(f_cond(r)):
-                    for s in block:
-                        _apply_to_record(nr, s)
-                    return nr
-            for s in default:
-                _apply_to_record(nr, s)
-            return nr
-        return dt.apply(_row_fn)
-
-    if kind == "project":
-        _, keep_keys = stmt
-        keep_set = set(keep_keys)
-        def _project_row(r):
-            to_drop = [k for k in list(r.data.keys()) if k not in keep_set]
-            for k in to_drop:
-                del r.data[k]
-        from ..Record import Record
-        def _row_fn(r):
-            nr = Record(dict(r.data), dict(r.meta))
-            _project_row(nr)
-            return nr
-        return dt.apply(_row_fn)
-
-    # ---- Structural ops ----
-
-    if kind == "rename":
-        _, src, dst = stmt
-        return dt.rename(**{src.indexer: dst.indexer})
-
-    if kind == "drop":
-        _, paths = stmt
-        return dt.drop(*paths)
-
-    if kind == "copy":
-        _, src, dst = stmt
-        return dt.copy(src, dst)
-
-    if kind == "default":
-        _, target, value = stmt
-        f_val = compile(value)
-        from ..Record import Record
-        def _default_row(r):
-            nr = Record(dict(r.data), dict(r.meta))
-            if nr.get(target) is None:
-                nr.set(target, f_val(r))
-            return nr
-        return dt.apply(_default_row)
-
-    if kind == "nest":
-        _, paths, into = stmt
-        from ..Record import Record
-        def _nest_row(r):
-            nr = Record(dict(r.data), dict(r.meta))
-            nested = {}
-            for p in paths:
-                key = p.indexer.split(".")[-1]
-                nested[key] = nr.get(p)
-                nr.delete(p)
-            nr.set(into, nested)
-            return nr
-        return dt.apply(_nest_row)
-
-    if kind == "unnest":
-        _, path = stmt
-        from ..Record import Record
-        def _unnest_row(r):
-            nr = Record(dict(r.data), dict(r.meta))
-            val = nr.get(path)
-            if isinstance(val, dict):
-                for k, v in val.items():
-                    nr.set(k, v)
-                nr.delete(path)
-            return nr
-        return dt.apply(_unnest_row)
-
-    # ---- Conditional ops (1→{0,1}) ----
-
-    if kind == "assert":
-        _, pred, message = stmt
-        f = compile(pred)
-        error_message = message or "SunBear assertion failed"
-        def _check(r, m, _f=f, _msg=error_message):
-            if not bool(_f(r)):
-                raise ValueError(_msg)
-            return True
-        return dt.filter(_check)
-
-    if kind == "mask":
-        _, target, pred, value = stmt
-        f_pred = compile(pred)
-        f_val = compile(value)
-        from ..Record import Record
-        def _mask_row(r):
-            nr = Record(dict(r.data), dict(r.meta))
-            if bool(f_pred(r)):
-                nr.set(target, f_val(r))
-            return nr
-        return dt.apply(_mask_row)
-
-    # ---- Sugar ops ----
-
-    if kind == "coalesce":
-        _, paths, target = stmt
-        from ..Record import Record
-        def _coalesce_row(r):
-            nr = Record(dict(r.data), dict(r.meta))
-            for p in paths:
-                v = nr.get(p)
-                if v is not None:
-                    nr.set(target, v)
-                    return nr
-            return nr
-        return dt.apply(_coalesce_row)
-
-    raise TypeError(f"Unknown statement kind: {kind!r}")
+from ..Record import Record
+from ..paths import MISSING, PathSpec, Key
+import copy
 
 
-def _fn_for(expr):
-    """Compile an expression to a (record) → value closure."""
-    return compile(expr)
-
-
-def _apply_to_record(r, stmt):
-    """Apply a statement directly to a record (used by fork/case branch fns)."""
-    kind = stmt[0]
-    if kind == "assign":
-        _, path, value = stmt
-        r.set(path, compile(value)(r))
-        return
-    if kind == "filter":
-        from .eval import FUNCS
-        path, pred = stmt[1], stmt[2]
-        f_pred = compile(pred)
-        new = FUNCS["filter"](r.get(path), f_pred, r)
-        r.set(path, new)
-        return
-    if kind == "map":
-        from .eval import FUNCS
-        path, fn = stmt[1], stmt[2]
-        f_fn = compile(fn)
-        r.set(path, FUNCS["map"](r.get(path), f_fn))
-        return
-    if kind == "flatten":
-        from .eval import FUNCS
-        path, level = stmt[1], stmt[2]
-        f_level = compile(level)
-        r.set(path, FUNCS["flatten"](r.get(path), f_level(r)))
-        return
-    if kind == "rename":
-        _, src, dst = stmt
-        v = r.get(src)
-        r.delete(src)
-        if v is not None:
-            r.set(dst, v)
-        return
-    if kind == "drop":
-        _, paths = stmt
-        for p in paths:
-            r.delete(p)
-        return
-    if kind == "copy":
-        _, src, dst = stmt
-        v = r.get(src)
-        if v is not None:
-            r.set(dst, v)
-        return
-    if kind == "default":
-        _, target, value = stmt
-        if r.get(target) is None:
-            r.set(target, compile(value)(r))
-        return
-    if kind == "mask":
-        _, target, pred, value = stmt
-        if bool(compile(pred)(r)):
-            r.set(target, compile(value)(r))
-        return
-    if kind == "coalesce":
-        _, paths, target = stmt
-        for p in paths:
-            v = r.get(p)
-            if v is not None:
-                r.set(target, v)
-                return
-        return
-    raise TypeError(f"Cannot apply statement {kind!r} directly to a record")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Public entry: run a sequence of expr statements against a DataTree
-# ═══════════════════════════════════════════════════════════════════════════
-
-def run_expr(dt, *statements):
-    """Apply a sequence of expr statements to a DataTree.
-
-    Statements are tuples returned by ``assign()``, ``keep()``, etc.
-    Nested lists/tuples are flattened. Applied eagerly in order.
-    """
-    flat = _flatten_stmts(statements)
-    for stmt in flat:
-        if not (isinstance(stmt, tuple) and stmt and isinstance(stmt[0], str)):
-            raise TypeError(f"Expected a tuple statement, got: {stmt!r}")
-        dt = _lower(stmt, dt)
-    return dt
+class TransformationError(ValueError):
+    """Pipeline failure with step/row context and the original exception cause."""
+    def __init__(self, step, row, kind, path=None):
+        self.step, self.row, self.kind, self.path = step, row, kind, path
+        super().__init__(f"Step {step} ({kind}), row {row}"
+                         + (f", path {path}" if path is not None else ""))
 
 
 def _flatten_stmts(items):
-    """Flatten nested lists/tuples of statements, keeping statement tuples intact."""
     out = []
     for item in items:
-        if isinstance(item, (list, tuple)) and item and isinstance(item[0], str) \
-                and item[0] in {"assign", "keep", "filter", "map", "flatten",
-                                "fork", "case", "project",
-                                "rename", "drop", "copy", "default",
-                                "nest", "unnest",
-                                "assert", "mask", "coalesce"}:
-            out.append(item)
-        elif isinstance(item, (list, tuple)):
+        if isinstance(item, (tuple, list)) and item and isinstance(item[0], str):
+            out.append(tuple(item))
+        elif isinstance(item, (tuple, list)):
             out.extend(_flatten_stmts(item))
         else:
-            out.append(item)
+            raise TypeError(f"Expected a statement, got {type(item).__name__}")
     return out
+
+
+def _path(value):
+    if isinstance(value, Lit):
+        value = value.value
+    Record.resolve(value)  # validate before consuming a row
+    return value
+
+
+def _compile_statement(stmt):
+    kind, *args = stmt
+    if kind in {"assign", "default", "mask"}:
+        path = _path(args[0])
+        val = compile(args[-1])
+        pred = compile(args[1]) if kind == "mask" else None
+        def apply(r):
+            if kind == "default" and r.get(path, MISSING) is not MISSING and r.get(path) is not None:
+                return r
+            if pred is None or bool(pred(r)):
+                r.set(path, val(r))
+            return r
+        return apply
+    if kind in {"keep", "assert"}:
+        pred = compile(args[0])
+        def apply(r):
+            if bool(pred(r)):
+                return r
+            if kind == "keep":
+                return None
+            raise ValueError(args[1] if args[1] is not None else "SunBear assertion failed")
+        return apply
+    if kind in {"filter", "map", "flatten"}:
+        path, value = _path(args[0]), compile(args[1])
+        from .eval import FUNCS
+        fn = FUNCS[kind]
+        def apply(r):
+            current = r.get(path, MISSING)
+            # Expression predicates evaluate against each list item; literal
+            # callbacks are called directly on the item.
+            if kind == "flatten":
+                result = fn(current, value(r))
+            else:
+                callback = value(r) if isinstance(args[1], Lit) else (
+                    lambda item: value(Record(item) if isinstance(item, dict) else item))
+                result = fn(current, callback, r) if kind == "filter" else fn(current, callback)
+            r.set(path, result)
+            return r
+        return apply
+    if kind == "fork":
+        cond = compile(args[0])
+        yes, no = compile_plan(args[1]), compile_plan(args[2])
+        return lambda r: (yes if bool(cond(r)) else no).execute(r, clone=False)
+    if kind == "case":
+        clauses = [(compile(c), compile_plan(block)) for c, block in args[0]]
+        default = compile_plan(args[1])
+        def apply(r):
+            for pred, block in clauses:
+                if bool(pred(r)):
+                    return block.execute(r, clone=False)
+            return default.execute(r, clone=False)
+        return apply
+    if kind == "project":
+        keys = frozenset(args[0])
+        def apply(r):
+            r.data = {k: v for k, v in r.data.items() if k in keys}
+            return r
+        return apply
+    if kind in {"rename", "copy"}:
+        src, dst = map(_path, args)
+        def apply(r):
+            return r.mv(src, dst) if kind == "rename" else r.cpy(src, dst)
+        return apply
+    if kind == "drop":
+        paths = tuple(map(_path, args[0]))
+        def apply(r):
+            for path in paths:
+                r.delete(path)
+            return r
+        return apply
+    if kind == "nest":
+        paths, into = tuple(map(_path, args[0])), _path(args[1])
+        def apply(r):
+            values = {}
+            for path in paths:
+                spec = path.indexer if isinstance(path, Path) else PathSpec.dotted(path)
+                key = spec.segments[-1].value
+                value = r.get(path, MISSING)
+                if value is not MISSING:
+                    values[key] = value
+                r.delete(path)
+            r.set(into, values)
+            return r
+        return apply
+    if kind == "unnest":
+        path = _path(args[0])
+        def apply(r):
+            value = r.get(path, MISSING)
+            if isinstance(value, dict):
+                r.delete(path)
+                for key, v in value.items():
+                    r.set(PathSpec((Key(key),)), v)
+            return r
+        return apply
+    if kind == "coalesce":
+        paths, target = tuple(map(_path, args[0])), _path(args[1])
+        def apply(r):
+            for path in paths:
+                value = r.get(path, MISSING)
+                if value is not MISSING and value is not None:
+                    r.set(target, value)
+                    break
+            return r
+        return apply
+    raise TypeError(f"Unsupported statement kind: {kind!r}")
+
+
+_ARITY = {"assign": 2, "default": 2, "mask": 3, "keep": 1, "assert": 2,
+          "filter": 2, "map": 2, "flatten": 2, "fork": 3, "case": 2,
+          "project": 1, "rename": 2, "copy": 2, "drop": 1, "nest": 2,
+          "unnest": 1, "coalesce": 2}
+
+
+class CompiledPlan:
+    """Compiled row-local stages. Global/expanding stages are rejected."""
+    def __init__(self, statements):
+        self.steps = []
+        self.stage_kind = "row-local"
+        for i, stmt in enumerate(_flatten_stmts(statements), 1):
+            if stmt[0] not in _ARITY or len(stmt) - 1 != _ARITY[stmt[0]]:
+                raise TypeError(f"Unsupported or malformed statement: {stmt[0]!r}")
+            self.steps.append((i, stmt[0], _compile_statement(stmt),
+                               getattr(stmt[1], "indexer", None)))
+
+    def execute(self, record, row=None, clone=True):
+        if clone:
+            record = Record(dict(record.data), copy.deepcopy(record.meta))
+        for step, kind, fn, path in self.steps:
+            try:
+                record = fn(record)
+            except TransformationError:
+                raise
+            except Exception as exc:
+                error = TransformationError(step, row if row is not None else record.meta.get("i"), kind, path)
+                # Preserve custom assertion text while retaining contextual diagnostics.
+                if kind == "assert":
+                    error.args = (f"{error}: {exc}",)
+                raise error from exc
+            if record is None:
+                break
+        return record
+
+    def apply(self, dt):
+        def rows():
+            for i, (record, meta) in enumerate(dt.scan()):
+                result = self.execute(record, row=i)
+                if result is not None:
+                    yield result, result.meta
+        return dt._derive(rows)
+
+
+def compile_plan(statements):
+    return CompiledPlan(statements)
+
+
+def run_expr(dt, *statements):
+    return compile_plan(statements).apply(dt)

@@ -400,7 +400,7 @@ class TestIntegration(unittest.TestCase):
         ])
         r = dt.expr(
             mask(b.label, b.x < 10, "low"),
-            keep(b.label != None),
+            keep(b.label.is_not_null()),
         )
         rows = r.collect()
         self.assertEqual(len(rows), 1)

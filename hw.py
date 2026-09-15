@@ -91,18 +91,18 @@ batch = next(batched(jetstream_generator(), 100))
 #%%
 dt = DataTree.from_records(batch)
 # %%
-dt.schema
+dt.infer_schema(sample=100).schema
 # dt.select(facets = b.commit.record.facets).head().pluck(b.facets)
 dt.expr(
     assign(b.facets, b.commit.record.facets),
-    keep(b.facets != None),
+    keep(b.facets.is_not_null()),
 ).head().pluck(b.facets)[0]
 # %%
-dt.schema
+dt.infer_schema(sample=100).schema
 #%%
 dt.expr(
     assign(b.feats, b.commit.record.facets.features['$type']),
-    keep(b.feats != None),
+    keep(b.feats.is_not_null()),
     assign(b.feats, sbo.flatten(b.feats))
 ).pluck(b.feats)
 # %%
@@ -112,16 +112,16 @@ dt.inspect(b.commit.record.facets.features)
 #%%
 dt.pluck(b.commit.record.createdAt)
 #%%
-dt.schema
+dt.infer_schema(sample=100).schema
 #%%
 from sunbear.Program import Program
 #%%
 prog = Program().expr(
     assign(b.tags, b.commit.record.facets.features.tag),
     assign(b.createdAt, b.commit.record.createdAt),
-    keep(b.tags != None),
+    keep(b.tags.is_not_null()),
     assign(b.tags, sbo.flatten(b.tags)),
-    keep(b.createdAt != None)
+    keep(b.createdAt.is_not_null())
 )
 # %%
 dt = DataTree.from_iter(jetstream_generator())
@@ -136,4 +136,5 @@ dt = DataTree.from_iter(jetstream_generator())
 prog(dt)
 
 #%%
-prog.to_DataTree()
+sb.write_jsonl(prog(dt).head(100), "jetstream-tags.jsonl")
+saved_tags = sb.read_jsonl("jetstream-tags.jsonl")

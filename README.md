@@ -1,7 +1,7 @@
 # SunBear — Lazy, Schema-Aware JSON Data Engine
 
 SunBear is a **row-based** data processing library for tree-structured JSON
-data. It combines lazy evaluation, a declarative expression builder, row-based
+data. It combines lazy evaluation, a declarative expression builder, explicit row-based
 caching, and type-level schema inference into a lightweight, composable toolkit.
 
 ## Key Features
@@ -15,8 +15,8 @@ caching, and type-level schema inference into a lightweight, composable toolkit.
   - `assign`, `keep` (row filter), `fork`/`case` (conditional branches)
   - `sbo` value-tier ops: `flatten`, `filter`, `map`, `reduce`, `chain`
   - `Expr.__call__` syntax: `b.createdAt(lambda t: datetime.fromisoformat(t))`
-- **Row-based Program caching** — `Program` defers an expr pipeline; each
-  input row is hashed individually for cache hit/miss
+- **Compiled Programs** — immutable definitions with optional explicit
+  row-based memoization and separate ordered JSONL output persistence
 - **Schema inference and reconciliation** — type-level schema trees with null
   invariance, type invariance (Leaf equivalence), and non-transitive semantics
 - **Rich Record indexer** — dotted paths, tuples, lists, dicts; single `_walk`
@@ -64,15 +64,15 @@ print(dt2.collect())
 # [{'name': 'Alice', 'age': 30, 'tags': [...], 'status': 'active', 'flat_tags': ['ring', 'gold']},
 #  {'name': 'Bob', 'age': 25, 'tags': [], 'status': 'active', 'flat_tags': []}]
 
-# Program (deferred with caching)
+# Program (immutable, compiled; caching is opt-in)
 from sunbear import Program
 
 prog = Program(name="adults").expr(
     assign(b.status, "active"),
     keep(b.age >= 18),
 )
-result = prog(dt)   # first run: cache miss, executes pipeline
-result = prog(dt)   # second run: cache hit, skips computation
+result = prog(dt)   # executes the compiled pipeline
+result = prog(dt)   # re-executes over the replayable source
 ```
 
 ## Installation
@@ -93,4 +93,6 @@ Requires Python ≥ 3.10.
 
 ## Project Status
 
-Version 0.2.0 — Active development. Core modules complete with 140+ tests.
+Version 0.3.0 — Active development. Core modules complete with 140+ tests.
+
+See [the 0.3 migration guide](docs/migration-0.3.md) for changed contracts.

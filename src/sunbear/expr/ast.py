@@ -5,6 +5,7 @@ Statements are tuples — see lower.py.
 """
 from __future__ import annotations
 from typing import Any
+from ..paths import PathSpec
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -32,6 +33,18 @@ class Expr:
             "SunBear expressions cannot be converted to bool. "
             "Combine predicates with &, |, and ~, using parentheses."
         )
+
+    def exists(self):
+        return Call("exists", [self])
+
+    def is_null(self):
+        return Call("is_null", [self])
+
+    def is_not_null(self):
+        return Call("is_not_null", [self])
+
+    def fill_missing(self, value):
+        return Call("fill_missing", [self, _wrap(value)])
 
     # arithmetic
     def __add__(self, other):  return BinOp("+", self, _wrap(other))
@@ -115,7 +128,7 @@ class Path(Expr):
     __slots__ = ("indexer",)
 
     def __init__(self, indexer: str):
-        self.indexer = indexer
+        self.indexer = PathSpec.dotted(indexer) if isinstance(indexer, str) else indexer
 
     def __repr__(self):
         return f"Path({self.indexer!r})"
@@ -123,12 +136,10 @@ class Path(Expr):
     def __getattr__(self, nxt: str) -> "Path":
         if nxt.startswith("_"):
             raise AttributeError(nxt)
-        return Path(f"{self.indexer}.{nxt}" if self.indexer else nxt)
+        return Path(self.indexer.append(nxt))
 
     def __getitem__(self, key) -> "Path":
-        if isinstance(key, str):
-            return Path(f"{self.indexer}.{key}" if self.indexer else key)
-        return Path(f"{self.indexer}[{key}]" if self.indexer else str(key))
+        return Path(self.indexer.append(key))
 
     def __ior__(self, value) -> tuple:
         """b.x |= expr  →  assign(b.x, expr)  (returns a statement tuple)."""
@@ -150,9 +161,7 @@ class LazyNamespace:
         return Path(name)
 
     def __getitem__(self, key) -> Path:
-        if isinstance(key, str):
-            return Path(key)
-        return Path(str(key))
+        return Path(PathSpec(()).append(key))
 
 
 b = LazyNamespace()
