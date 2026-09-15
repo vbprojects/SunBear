@@ -2,7 +2,7 @@
 
 `DataTree` is the core table abstraction in SunBear. It stores an iterable of
 `(Record, meta)` tuples (called **Twigs**) and provides lazy transformations
-(maps, filters, branches) that return new DataTree generators without
+(maps, filters, branches) that preserve source replayability without
 materializing intermediate results.
 
 **Key design decisions:**
@@ -10,7 +10,7 @@ materializing intermediate results.
 - **No invertibility** — no undo history, no provenance markers. Records are
   mutable and shared by reference.
 - **Lazy by default** — `map`, `filter`, `branch_map`, `insert`, `take` all
-  return generators. Only terminal operations (`collect`, `pluck`, `rows`,
+  preserve the source capability. Only terminal operations (`collect`, `pluck`, `rows`,
   `group_by`, `join`, `sort_by`) drain the stream.
 - **Plan layer** — inter-record ops (`group_by`, `join`, `reduce_by`) build a
   `Plan` index with automatic cardinality detection.
@@ -48,7 +48,7 @@ dt = DataTree.from_iter(gen())
 
 ## Lazy Primitives
 
-All return a new `DataTree` backed by a generator. No work is done until
+Lazy methods return a new `DataTree` preserving source capability. No work is done until
 a terminal operation is called.
 
 | Method | Description |
@@ -156,7 +156,7 @@ Plan detects cardinality by sampling the first 64 rows:
 ## Schema Introspection
 
 ```python
-schema = dt.schema   # materializes, infers, and reconciles all rows
+schema = dt.infer_schema(sample=100).schema   # bounded, retained preview
 schema.show()        # Unicode tree (terminal) or collapsible HTML (Jupyter)
 ```
 
@@ -192,3 +192,43 @@ Each row in a DataTree is a `Twig = Tuple[Record, dict]`:
 for record, meta in dt.scan():
     print(record.data, meta)
 ```
+
+## Source lifetime and migration
+
+Lazy transformations now preserve the source's capability. Check
+`tree.replayable` or `repr(tree)` without evaluating it.
+
+| Constructor | Capability |
+|---|---|
+| `from_records(records)` | Eager reusable backing storage |
+| `from_iter(iterable)` | Single-pass, shared cursor |
+| `from_iter_factory(factory)` | Replayable; fresh iterable on each traversal |
+
+Replayability re-executes callbacks. Callbacks with side effects or mutations
+can therefore produce different results. It does not memoize outputs.
+Combining sources is replayable only when both inputs are replayable.
+
+`iter_rows()` is the canonical incremental dictionary interface.
+`collect()` consumes remaining rows and returns a list; it never changes the
+source into a snapshot. Use `materialize()` for an isolated reusable snapshot
+of the remaining rows. Full collection and materialization require finite input.
+
+`peek(n=5)` returns an isolated preview of at most n upcoming rows. Single-pass
+sources retain these rows for subsequent iteration. Repeated previews do not
+advance beyond the largest requested outstanding preview. Memory use grows
+with the requested row count and row sizes; no unlimited implicit cache exists.
+Source cursors are shared, intended for sequential use, and not thread-safe.
+A preview of a filtered pipeline may read many upstream rows to find n matches.
+
+`infer_schema(sample=100)` returns a `SchemaSample` with `schema`,
+`sampled_rows`, and `sample_limit`. These are observations, not a full-stream
+guarantee. `inspect(indexer, sample=100)` also uses bounded lookahead.
+The `schema` property only returns the most recently inferred schema and never
+reads input; before inference it raises with migration guidance. It is not
+automatically refreshed after external record mutation.
+
+Replace `tree.schema` with `tree.infer_schema(sample=100).schema`.
+Replace implicit `len(tree)` materialization with `len(tree.materialize())`.
+Length and truth-testing work only for known-size backing storage; otherwise
+they raise without reading input. Use `bool(tree.peek(1))` to check for rows.
+Legacy iterator aliases remain available.
