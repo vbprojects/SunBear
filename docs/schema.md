@@ -202,3 +202,21 @@ dt = DataTree.from_records([{"a": 1}, {"a": 2}])
 schema = dt.schema   # materializes, infers, reconciles
 schema.show()
 ```
+
+## Copy notebook paths as selectors
+
+In IPython/Jupyter HTML output, click a field name to copy a paste-ready selector
+such as `f['author']['id']`. Import `f` with `from sunbear import f`, then paste
+into `select`, `assign`, or another expression. Bracket syntax preserves literal
+dots, quotes, Python keywords, and names that collide with expression methods.
+Nested list fields use explicit traversal, for example `f['posts'][...]['text']`.
+Use `.as_('texts')` or `select(texts=...)` to project that nested value; positional
+`select(path)` retains the complete top-level field under the existing contract.
+
+Buttons support keyboard activation and announce copy status. Clicking a branch
+name copies its selector; the disclosure arrow still expands or collapses it.
+If clipboard permission is unavailable, the renderer attempts a legacy copy and
+then exposes a selected input for manual copying. The **Copyable selectors**
+section is always available for manual copying, including notebook frontends
+that disable JavaScript or strip event handlers from untrusted output. No
+notebook extension or new dependency is required.
