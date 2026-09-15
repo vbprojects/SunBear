@@ -12,6 +12,7 @@ Use inside an expr pipeline, e.g.::
         assign(b.kept_tags, sbo.filter(b.flat_tags, lambda x: isinstance(x, str))),
     )
 """
+
 from __future__ import annotations
 from .ast import Call, Lit, _, Placeholder, substitute
 from .eval import _MISSING
@@ -64,6 +65,7 @@ def count(value) -> Call:
 # chain — build-time AST substitution pipeline
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def chain(seed, *steps):
     """Build-time AST substitution pipeline.
 
@@ -75,13 +77,11 @@ def chain(seed, *steps):
         chain(flatten(b.tags, -1), filter(_, lambda x: isinstance(x, str)))
     """
     acc = seed
-    if isinstance(acc, Call):
-        if any(_contains_placeholder(a) for a in acc.args) or \
-           any(_contains_placeholder(v) for v in acc.kwargs.values()):
-            raise ValueError("chain: first step must not contain '_'")
+    if _contains_placeholder(acc):
+        raise ValueError("chain: first step must not contain '_'")
     for i, step in enumerate(steps):
         if not _contains_placeholder(step):
-            raise ValueError(f"chain: step {i+1} must contain '_'")
+            raise ValueError(f"chain: step {i + 1} must contain '_'")
         acc = substitute(step, _, acc)
     return acc
 
@@ -90,22 +90,27 @@ def _contains_placeholder(node) -> bool:
     """Check whether an AST node contains a ``Placeholder`` reference."""
     if node is _:
         return True
-    from .ast import Lit, Col, Path, Placeholder, BinOp, UnOp, Call
-    if isinstance(node, (Lit, Col, Path, Placeholder)):
+    from .ast import Col, Path, BinOp, UnOp, Sugar, Item
+
+    if isinstance(node, Sugar):
+        return any(_contains_placeholder(a) for a in node.args)
+    if isinstance(node, (Lit, Col, Path, Placeholder, Item)):
         return False
     if isinstance(node, BinOp):
         return _contains_placeholder(node.left) or _contains_placeholder(node.right)
     if isinstance(node, UnOp):
         return _contains_placeholder(node.operand)
     if isinstance(node, Call):
-        return (any(_contains_placeholder(a) for a in node.args) or
-                any(_contains_placeholder(v) for v in node.kwargs.values()))
+        return any(_contains_placeholder(a) for a in node.args) or any(
+            _contains_placeholder(v) for v in node.kwargs.values()
+        )
     return False
 
 
 def _wrap(x):
     """Local _wrap (also exported from ast.py). Coerce value to Expr."""
     from .ast import Expr as _Expr, Lit as _Lit
+
     if isinstance(x, _Expr):
         return x
     return _Lit(x)

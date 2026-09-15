@@ -1,3 +1,5 @@
+> For the recommended public API, see [fluent syntax](syntax.md). This page documents the advanced compatibility API.
+
 # Expr — Declarative Expression Builder
 
 The `expr` module provides a declarative API for building DataTree
@@ -45,7 +47,7 @@ dt.expr(mask(b.flag, b.age < 18, "minor"))    # conditional set
 dt.expr(coalesce(b.nickname, b.name, target=b.display))
 
 # Path sugar (outside function calls)
-stmt = b.x |= some_expr   # equivalent to assign(b.x, some_expr)
+stmt = assign(b.x, some_expr)
 ```
 
 ---
@@ -116,7 +118,7 @@ assign(tags=b.commit.record.tags, createdAt=b.commit.record.createdAt)
 
 **`|=` sugar** (outside function calls, returns a statement tuple):
 ```python
-stmt = b.tags |= sbo.flatten(b.tags, -1)
+stmt = assign(b.tags, sbo.flatten(b.tags, -1))
 # equivalent to: assign(b.tags, sbo.flatten(b.tags, -1))
 ```
 

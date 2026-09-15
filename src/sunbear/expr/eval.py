@@ -5,6 +5,7 @@ Two halves:
 2. FUNCS registry for value-tier ops (sbo.flatten/filter/map/reduce/length).
    `sbo.filter` uses the metadata skip-flag mechanism for lazy iteration.
 """
+
 from __future__ import annotations
 from typing import Any, Callable
 
@@ -17,19 +18,19 @@ from .ast import Expr, Lit, Col, BinOp, UnOp, Call, Path, Placeholder
 # ═══════════════════════════════════════════════════════════════════════════
 
 OPS = {
-    "+":  lambda a, b: a + b,
-    "-":  lambda a, b: a - b,
-    "*":  lambda a, b: a * b,
-    "/":  lambda a, b: a / b,
-    "<":  lambda a, b: a < b,
+    "+": lambda a, b: a + b,
+    "-": lambda a, b: a - b,
+    "*": lambda a, b: a * b,
+    "/": lambda a, b: a / b,
+    "<": lambda a, b: a < b,
     "<=": lambda a, b: a <= b,
-    ">":  lambda a, b: a > b,
+    ">": lambda a, b: a > b,
     ">=": lambda a, b: a >= b,
     "==": lambda a, b: a == b,
     "!=": lambda a, b: a != b,
-    "&":  lambda a, b: bool(a) and bool(b),
-    "|":  lambda a, b: bool(a) or bool(b),
-    "~":  lambda a: not a,
+    "&": lambda a, b: bool(a) and bool(b),
+    "|": lambda a, b: bool(a) or bool(b),
+    "~": lambda a: not a,
 }
 
 
@@ -49,56 +50,63 @@ def register_func(name: str, fn: Callable) -> None:
 # compile — AST → (record) → value
 # ═══════════════════════════════════════════════════════════════════════════
 
-def compile(node: Expr):
-    """Compile an Expr node to a closure ``(record) → value``.
 
-    Path binding lives in Col/Path: ``r.get(node.indexer)``.
-    """
+def compile(node: Expr):
+    """Compile a closed expression; reject unbound item symbols before reading rows."""
+    fn = _compile(node, frozenset())
+    return lambda record: fn(record, {})
+
+
+def _compile(node, scope):
+    from .ast import Sugar, Item
+    from ._sugar import compile_sugar
+
+    if isinstance(node, Sugar):
+        return compile_sugar(node, _compile, scope)
+    if isinstance(node, Item):
+        if node.symbol not in scope:
+            raise ValueError(f"Unbound item symbol: {node.symbol}")
+
+        def item_value(r, env):
+            from ..record import Record
+
+            value = env[node.symbol]
+            return (
+                Record(value).get(node.indexer, MISSING)
+                if node.indexer.segments
+                else value
+            )
+
+        return item_value
     if isinstance(node, Lit):
-        v = node.value
-        return lambda r: v
-    if isinstance(node, Col):
-        ix = node.indexer
-        return lambda r: r.get(ix, MISSING)
-    if isinstance(node, Path):
-        ix = node.indexer
-        return lambda r: r.get(ix, MISSING)
+        return lambda r, env: node.value
+    if isinstance(node, (Col, Path)):
+        return lambda r, env: r.get(node.indexer, MISSING)
     if isinstance(node, BinOp):
-        L = compile(node.left)
-        R = compile(node.right)
+        left, right = _compile(node.left, scope), _compile(node.right, scope)
         op = OPS[node.op]
         if node.op == "&":
-            return lambda r: bool(L(r)) and bool(R(r))
+            return lambda r, env: bool(left(r, env)) and bool(right(r, env))
         if node.op == "|":
-            return lambda r: bool(L(r)) or bool(R(r))
-        return lambda r: op(L(r), R(r))
+            return lambda r, env: bool(left(r, env)) or bool(right(r, env))
+        return lambda r, env: op(left(r, env), right(r, env))
     if isinstance(node, UnOp):
-        operand = compile(node.operand)
-        op = OPS[node.op]
-        return lambda r: op(operand(r))
+        operand, op = _compile(node.operand, scope), OPS[node.op]
+        return lambda r, env: op(operand(r, env))
     if isinstance(node, Call):
         implementation = FUNCS[node.name]
-        A = [compile(a) for a in node.args]
-        K = {k: compile(v) for k, v in node.kwargs.items()}
-        # Ops that need the record itself (for metadata side-effects).
-        # They receive (value..., record) as trailing positional arg.
-        _RECORD_AWARE = {"filter"}
-        if node.name in _RECORD_AWARE:
-            def closure(r, _A=A, _K=K, _name=node.name):
-                return implementation(
-                    *[a(r) for a in _A],
-                    r,
-                    **{k: v(r) for k, v in _K.items()},
-                )
-            return closure
-        def closure(r, _A=A, _K=K, _name=node.name):
-            return implementation(
-                *[a(r) for a in _A],
-                **{k: v(r) for k, v in _K.items()},
-            )
+        args = [_compile(a, scope) for a in node.args]
+        kwargs = {k: _compile(v, scope) for k, v in node.kwargs.items()}
+
+        def closure(r, env):
+            values = [a(r, env) for a in args]
+            if node.name == "filter":
+                values.append(r)
+            return implementation(*values, **{k: v(r, env) for k, v in kwargs.items()})
+
         return closure
     if isinstance(node, Placeholder):
-        raise RuntimeError("'_' placeholder used outside chain() — must be substituted at build time")
+        raise RuntimeError("'_' placeholder used outside chain()")
     raise TypeError(f"Unknown Expr node: {type(node).__name__}")
 
 

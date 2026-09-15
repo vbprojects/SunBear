@@ -69,3 +69,10 @@ __all__ = [
     "assert_", "mask", "cast", "upper", "lower_str", "trim", "round_field", "coalesce",
     "sbo",
 ]
+
+from .ast import b as f
+from ._sugar import lit, field, item, all_of, any_of, not_, array, object_ as object, when, match, concat_str, format_str
+# Runtime registries and compiler details remain available for compatibility,
+# but are deliberately absent from star imports and introductory documentation.
+__all__ = [name for name in __all__ if name not in {'OPS', 'FUNCS', 'compile', '_wrap', 'substitute', 'run_expr'}]
+__all__ += ['f', 'lit', 'field', 'item', 'all_of', 'any_of', 'not_', 'array', 'object', 'when', 'match', 'concat_str', 'format_str']

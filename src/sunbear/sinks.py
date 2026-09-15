@@ -3,7 +3,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from .Program import _encoded
+from ._codec import _encoded
 
 
 def write_jsonl(tree, path):
@@ -30,7 +30,7 @@ def write_jsonl(tree, path):
 
 def read_jsonl(path):
     """Replayable file source. Each traversal reopens the file."""
-    from .DataTree import DataTree
+    from .tree import DataTree
     def rows():
         with open(path, encoding="utf-8") as f:
             for line in f:
