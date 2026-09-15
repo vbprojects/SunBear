@@ -244,7 +244,8 @@ class Leaf(Node):
         return [repr(self.type)]
 
     def _repr_html_impl(self, collapsed: bool = False) -> str:
-        return f"<span>{self.type!r}</span>"
+        from html import escape
+        return f"<span>{escape(repr(self.type))}</span>"
 
 
 class Branch(Node):
@@ -338,42 +339,9 @@ class Branch(Node):
                 child._build_tree_lines(lines, child_prefix, False)
 
     def _repr_html_impl(self, collapsed: bool = False) -> str:
-        """Build collapsible HTML tree for Jupyter."""
-        open_attr = "" if collapsed else " open"
-        if not self.fields:
-            return (
-                f"<details{open_attr}>"
-                f"<summary><b>Root</b></summary>"
-                f"<span style='color:#888'>(empty)</span>"
-                f"</details>"
-            )
-
-        html = (
-            f"<details{open_attr}>"
-            f"<summary><b>Root</b></summary>"
-            f"<ul style='list-style-type:none; padding-left: 20px; margin: 0;'>"
-        )
-        for name, child in self.fields.items():
-            html += self._child_html(name, child, collapsed)
-        html += "</ul></details>"
-        return html
-
-    def _child_html(self, name: str, child: Node, collapsed: bool) -> str:
-        """Render a single child node as HTML."""
-        if isinstance(child, Leaf):
-            return f"<li><span><b>{name}</b> : {child.type!r}</span></li>"
-        elif isinstance(child, Branch):
-            open_attr = "" if collapsed else " open"
-            inner = (
-                f"<details{open_attr}>"
-                f"<summary><b>{name}</b></summary>"
-                f"<ul style='list-style-type:none; padding-left: 20px; margin: 0;'>"
-            )
-            for cname, cchild in child.fields.items():
-                inner += child._child_html(cname, cchild, collapsed)
-            inner += "</ul></details>"
-            return f"<li>{inner}</li>"
-        return ""
+        """Collapsible notebook tree with click-to-copy field selectors."""
+        from ._schema_html import render
+        return render(self, collapsed=collapsed)
 
     # -- type statistics --
 
@@ -631,10 +599,8 @@ class Schema:
         return self._repr_html_impl()
 
     def _repr_html_impl(self, collapsed: bool = False) -> str:
-        if self._name:
-            html = self._root._repr_html_impl(collapsed=collapsed)
-            return html.replace("<b>Root</b>", f"<b>{self._name}</b>")
-        return self._root._repr_html_impl(collapsed=collapsed)
+        from ._schema_html import render
+        return render(self._root, collapsed=collapsed, name=self._name or "Root")
 
     def show(self, collapsed: bool = False) -> None:
         """Display schema: auto-detect IPython or fall back to print."""
