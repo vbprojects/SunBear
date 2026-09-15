@@ -26,7 +26,7 @@ Structural ops (1→1 shape):
     unnest(path)                — flatten nested dict into top-level
 
 Conditional ops (1→{0,1}):
-    assert_(pred, message=None) — filter/raise on failing rows
+    assert_(pred, message=None) — raise on failing rows
     mask(target, pred, value)   — set field only where pred holds
 
 Sugar ops:
