@@ -6,8 +6,8 @@ caching, and type-level schema inference into a lightweight, composable toolkit.
 
 ## Key Features
 
-- **Lazy DataTree** — iterator-native design; primitives (`map`, `filter`,
-  `branch_map`) return generators that don't materialize until consumed
+- **Lazy DataTree** — explicit replayable/single-pass sources; primitives (`map`, `filter`,
+  `branch_map`) preserve source capability without implicit caching
 - **Plan layer** — inter-record operations (`group_by`, `join`, `reduce_by`)
   build an index with cardinality detection (1:1, 1:N, N:1, N:M)
 - **Declarative expression builder** (`dt.expr(...)`) — syntactic sugar that

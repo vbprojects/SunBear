@@ -2,7 +2,7 @@
 
 Schema.py was copied verbatim from src_old/sunbear/Schema.py with only a
 minor adaptation (Schema.from_records accepts a list of plain dicts, since
-DataTree is now lazy — call .collect() first or access via dt.schema).
+DataTree is now lazy — call .collect() first or access via dt.infer_schema().schema).
 
 These tests cover:
 - Type inference (Primitive, NullType, UnionType, ListType)
@@ -237,9 +237,9 @@ class TestSchemaClass(unittest.TestCase):
 class TestSchemaDataTreeIntegration(unittest.TestCase):
 
     def test_dt_schema_lazy_materializes(self):
-        # dt.schema auto-materializes the stream
+        # dt.infer_schema().schema auto-materializes the stream
         dt = DataTree.from_records([{"a": 1, "b": "x"}])
-        schema = dt.schema
+        schema = dt.infer_schema().schema
         self.assertIsInstance(schema, Schema)
 
     def test_dt_schema_after_expr(self):
@@ -247,7 +247,7 @@ class TestSchemaDataTreeIntegration(unittest.TestCase):
         from sunbear.expr import b, assign
         dt = DataTree.from_records([{"a": 1}])
         dt2 = dt.expr(assign(b.b, 2))
-        schema = dt2.schema
+        schema = dt2.infer_schema().schema
         self.assertIsInstance(schema, Schema)
         # the reconciled branch should contain 'a' and 'b'
         self.assertIn("a", schema._root.fields)

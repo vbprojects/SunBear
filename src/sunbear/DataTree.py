@@ -13,6 +13,9 @@ from __future__ import annotations
 import copy
 import itertools
 from typing import Any, Callable, Iterable, Iterator, List, Tuple
+from collections import deque
+from dataclasses import dataclass
+from collections.abc import Iterator as IteratorABC
 
 from .Record import Record, _freeze
 
@@ -119,17 +122,75 @@ def _detect_cardinality(sample_keys: list) -> str:
 # DataTree
 # ═══════════════════════════════════════════════════════════════════════════
 
+@dataclass(frozen=True)
+class SchemaSample:
+    """Schema observations from a bounded preview, never a stream guarantee."""
+    schema: Any
+    sampled_rows: int
+    sample_limit: int
+
+
+class _Source:
+    def __init__(self, rows=None, *, factory=None):
+        self.replayable = factory is not None or not isinstance(rows, IteratorABC)
+        self.factory = factory if factory is not None else (
+            (lambda: iter(rows)) if self.replayable else None)
+        self.iterator = None if self.replayable else iter(rows)
+        self.buffer = deque()
+        self.known_size = len(rows) if isinstance(rows, (list, tuple)) else None
+
+    def scan(self):
+        if self.replayable:
+            return iter(self.factory())
+        def remaining():
+            while self.buffer:
+                yield self.buffer.popleft()
+            # Closing a scan view must not close the shared source cursor.
+            for row in self.iterator:
+                yield row
+        return remaining()
+
+    def peek(self, n):
+        if self.replayable:
+            return list(itertools.islice(self.scan(), n))
+        while len(self.buffer) < n:
+            try:
+                self.buffer.append(next(self.iterator))
+            except StopIteration:
+                break
+        return list(itertools.islice(self.buffer, n))
+
+
 class DataTree:
     """Iterator-native, row-based table.
 
     Construction accepts any iterable (list, generator, sequence). All
-    lazy primitives (map/filter/branch_map/insert/take) return generators
-    that are NOT cached — each traversal re-runs upstream ops.
+    lazy primitives preserve replayability. Single-pass sources share one
+    cursor; replayable sources re-execute transformations without caching.
     """
 
     def __init__(self, rows: Iterable[Twig]):
-        # DO NOT eagerly materialize. Store the iterable as-is.
-        self._rows = rows
+        self._source = _Source(rows)
+        self._known_schema = None
+
+    @classmethod
+    def _from_factory(cls, factory):
+        tree = cls([])
+        tree._source = _Source(factory=factory)
+        return tree
+
+    @property
+    def replayable(self):
+        return self._source.replayable
+
+    def __repr__(self):
+        capability = "replayable" if self.replayable else "single-pass"
+        size = self._source.known_size
+        return f"DataTree({capability}, size={size if size is not None else 'unknown'})"
+
+    def _derive(self, factory):
+        return (DataTree._from_factory(factory) if self.replayable
+                else DataTree(factory()))
 
     # ---- constructors ----
 
@@ -153,28 +214,68 @@ class DataTree:
                 yield Record(dict(r), {"i": i}), {"i": i}
         return cls(gen())
 
-    # ---- iteration ----
+    @classmethod
+    def from_iter_factory(cls, factory) -> "DataTree":
+        """Replayable lazy source. The factory must return a fresh iterable."""
+        if not callable(factory):
+            raise TypeError("from_iter_factory() requires a callable")
+        def rows():
+            for i, row in enumerate(factory()):
+                meta = {"i": i}
+                yield Record(dict(row), meta), meta
+        return cls._from_factory(rows)
+
+    # ---- iteration and explicit inspection ----
 
     def __iter__(self) -> Iterator[Twig]:
-        return iter(self._rows)
+        return self.scan()
 
     def scan(self):
-        """Alias for __iter__ — yields fresh (Record, meta) tuples."""
-        return iter(self._rows)
+        return self._source.scan()
 
     def _materialize(self) -> list:
-        """Single explicit materialization point. Caches result on self."""
-        if not isinstance(self._rows, list):
-            self._rows = list(self._rows)
-        return self._rows
+        """Consume remaining rows without changing the source capability."""
+        return list(self.scan())
+
+    def materialize(self) -> "DataTree":
+        """Consume a finite source's remaining rows into an isolated snapshot."""
+        return DataTree(copy.deepcopy(self._materialize()))
 
     def __len__(self) -> int:
-        materialized = self._materialize()
-        return len(materialized)
+        if self._source.known_size is None:
+            raise TypeError("DataTree size is unknown; use materialize() explicitly")
+        return self._source.known_size
 
     def __bool__(self) -> bool:
-        self._materialize()
-        return bool(self._rows)
+        if self._source.known_size is None:
+            raise TypeError("Cannot truth-test an unevaluated DataTree; use peek(1)")
+        return self._source.known_size != 0
+
+    @staticmethod
+    def _validate_sample(n):
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            raise ValueError("sample size must be a non-negative integer")
+
+    def peek(self, n=5) -> list:
+        """Preview at most n upcoming rows; single-pass lookahead is retained.
+
+        Memory is bounded by the largest outstanding requested preview.
+        Returned dictionaries are isolated from the buffered records.
+        """
+        self._validate_sample(n)
+        return [copy.deepcopy(r.data) for r, _ in self._source.peek(n)]
+
+    def infer_schema(self, sample=100) -> SchemaSample:
+        """Infer from at most sample rows without discarding them."""
+        from .Schema import Schema
+        rows = self.peek(sample)
+        schema = Schema.from_records(rows)
+        self._known_schema = schema
+        return SchemaSample(schema, len(rows), sample)
+
+    def iter_rows(self) -> Iterator[dict]:
+        """Yield incremental dictionaries; legacy iterator aliases remain."""
+        yield from self.itercollect()
 
     # ---- terminal extractors ----
 
@@ -187,8 +288,8 @@ class DataTree:
         ix = Record.resolve(indexer)
         return [r.get(indexer) for r, _ in self.scan()]
 
-    def inspect(self, indexer):
-        """Return the inferred Schema of values at *indexer* across all rows.
+    def inspect(self, indexer, sample=100):
+        """Return the inferred Schema of a retained bounded sample at *indexer*.
 
         The returned Schema is named after the indexer for display purposes.
         Supports all Record indexer types: str, dotted-str, tuple, list, dict.
@@ -220,9 +321,10 @@ class DataTree:
         else:
             display_name = str(indexer)
 
-        # Extract values from all rows at the given indexer
+        # Extract a bounded, non-destructive preview at the given indexer
         values = []
-        for r, _ in self.scan():
+        for row in self.peek(sample):
+            r = Record(row)
             try:
                 v = r.get(indexer)
                 values.append(v)
@@ -307,7 +409,7 @@ class DataTree:
         def gen():
             for r, m in self.scan():
                 yield fn(r), m
-        return DataTree(gen())
+        return self._derive(gen)
 
     def filter(self, pred: Callable[[Record, dict], bool]) -> "DataTree":
         """Record-level filter. Yields rows where pred is True."""
@@ -315,7 +417,7 @@ class DataTree:
             for r, m in self.scan():
                 if pred(r, m):
                     yield r, m
-        return DataTree(gen())
+        return self._derive(gen)
 
     def branch_map(self, roots, fn: Callable[[Record], None]) -> "DataTree":
         """Apply ``fn(record)`` to each row in-place on a shallow copy.
@@ -341,15 +443,21 @@ class DataTree:
                     new = Record(new_data, dict(m))
                 fn(new)
                 yield new, m
-        return DataTree(gen())
+        return self._derive(gen)
 
     def insert(self, rows: Iterable[Twig]) -> "DataTree":
         """Append rows from any iterable. Chained lazy."""
-        return DataTree(itertools.chain(self.scan(), rows))
+        other = rows if isinstance(rows, DataTree) else DataTree(rows)
+        factory = lambda: itertools.chain(self.scan(), other.scan())
+        if self.replayable and other.replayable:
+            return DataTree._from_factory(factory)
+        return DataTree(factory())
 
     def take(self, start: int = 0, stop: int | None = None) -> "DataTree":
         """Slice by position. Equivalent to ``itertools.islice``."""
-        return DataTree(itertools.islice(self.scan(), start, stop))
+        # Validate immediately without reading the source.
+        itertools.islice((), start, stop)
+        return self._derive(lambda: itertools.islice(self.scan(), start, stop))
 
     def head(self, n: int = 5) -> "DataTree":
         return self.take(0, n)
@@ -400,7 +508,7 @@ class DataTree:
                 else:
                     yield Record(dict(r.data), dict(m)), dict(m)
 
-        return DataTree(gen())
+        return self._derive(gen)
 
     def tail(self, n: int = 5) -> "DataTree":
         """Last n rows — needs full materialization."""
@@ -579,22 +687,10 @@ class DataTree:
 
     @property
     def schema(self):
-        """Infer schema by materializing and reconciling all records.
-
-        Lazy DataTrees are drained on access. Result is a Schema instance.
-        """
-        from .Schema import Schema, infer_schema, reconcile, Branch as _Branch
-        materialized = self.collect()
-        if not materialized:
-            return Schema(_Branch({}))
-        branches = []
-        for rec in materialized:
-            node = infer_schema(rec)
-            if isinstance(node, _Branch):
-                branches.append(node)
-        if not branches:
-            return Schema(_Branch({}))
-        return Schema(reconcile(branches))
+        """Return previously inferred information without reading records."""
+        if self._known_schema is None:
+            raise RuntimeError("Schema is unknown; use infer_schema(sample=n).schema")
+        return self._known_schema
 
     def plan(self, key, side: str = "left") -> Plan:
         """Build a Plan object explicitly (for callers who want .explain())."""
@@ -622,8 +718,8 @@ class DataTree:
 
     def __add__(self, other) -> "DataTree":
         if isinstance(other, DataTree):
-            return self.insert(other.scan())
-        return self.insert(DataTree.from_records(other).scan())
+            return self.insert(other)
+        return self.insert(DataTree.from_records(other))
 
     def __or__(self, fn) -> "DataTree":
         """Pipe: ``dt | func`` → ``func(dt)``."""

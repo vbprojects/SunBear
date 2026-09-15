@@ -371,7 +371,7 @@ class TestSchema(unittest.TestCase):
 
     def test_schema_inference(self):
         dt = DataTree.from_records([{"a": 1, "b": "hi"}, {"a": 2, "b": "yo"}])
-        schema = dt.schema
+        schema = dt.infer_schema().schema
         self.assertIsInstance(schema, Schema)
 
     def test_schema_show(self):
@@ -382,23 +382,23 @@ class TestSchema(unittest.TestCase):
             sys.stdout.reconfigure(encoding="utf-8")
         except (AttributeError, ValueError):
             pass
-        dt.schema.show()
+        dt.infer_schema().schema.show()
 
     def test_schema_handles_homogeneous_types(self):
         dt = DataTree.from_records([{"a": 1}, {"a": 2}, {"a": 3}])
-        schema = dt.schema
+        schema = dt.infer_schema().schema
         # Leaf(int) == Leaf(str) is True per v3 spec, so it should reconcile cleanly
         self.assertIsInstance(schema, Schema)
 
     def test_schema_handles_mixed_types(self):
         dt = DataTree.from_records([{"a": 1}, {"a": "hi"}])
-        schema = dt.schema
+        schema = dt.infer_schema().schema
         # mixed types may yield SchemaList (unreconcilable); both are acceptable
         self.assertIsNotNone(schema)
 
     def test_schema_empty_dt(self):
         dt = DataTree.from_records([])
-        schema = dt.schema
+        schema = dt.infer_schema().schema
         self.assertIsInstance(schema, Schema)
 
 

@@ -10,7 +10,7 @@ Architecture:
 Dropped: invertibility (no _history, no undo closures, no provenance markers).
 """
 from .ADict import ADict, ADictStream
-from .DataTree import DataTree, Plan, Twig
+from .DataTree import DataTree, Plan, Twig, SchemaSample
 from .Program import Program, AbstractCache, FileCache
 from .Record import Record, _freeze, _mkpath
 
@@ -23,7 +23,7 @@ from . import expr
 
 __all__ = [
     "ADict", "ADictStream",
-    "DataTree", "Plan", "Twig",
+    "DataTree", "Plan", "Twig", "SchemaSample",
     "Program", "AbstractCache", "FileCache",
     "Record", "_freeze", "_mkpath",
     "Schema", "SchemaType", "Primitive", "NullType", "UnionType",
