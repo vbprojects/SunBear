@@ -9,6 +9,8 @@ Minimal, iterator-friendly record:
 """
 from __future__ import annotations
 from typing import Any
+import copy
+from .paths import MISSING, PathSpec, Key, Index, Traverse, output_value
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -88,6 +90,16 @@ class Record:
         """
         # Expr leaf nodes (Path, Col) carry their own indexer
         ix = getattr(indexer, "indexer", None)
+        if isinstance(ix, PathSpec):
+            indexer = ix
+        if isinstance(indexer, PathSpec):
+            out = {}
+            cur = out
+            for seg in indexer.segments:
+                key = seg.value if isinstance(seg, (Key, Index)) else seg
+                cur[key] = {}
+                cur = cur[key]
+            return out
         if ix is not None and isinstance(ix, str):
             return _mkpath(ix) if ix else {}
         if isinstance(indexer, dict):
@@ -105,57 +117,71 @@ class Record:
 
     @staticmethod
     def _walk(node, path: dict, action: str, value=None):
-        """Recursive get/set/delete over ``node`` guided by nested-dict path.
-
-        action: "get" | "set" | "delete"
-        - "get": returns leaf value, or None if missing or node not a dict
-        - "set": creates intermediate dicts as needed, assigns value at leaf
-        - "delete": pops leaf, no-op if missing
-
-        Lists are transparently traversed: when the walker encounters a list
-        at an intermediate position in the path (e.g. ``facets.features``
-        where ``facets`` is a list of dicts), it walks each list element
-        with the remaining path and collects the results into a list.
-        """
         if not path:
             return node if action == "get" else None
-        # --- list transparency: walk into each element ---
-        if isinstance(node, list):
-            if action == "get":
-                results = []
-                for item in node:
-                    r = Record._walk(item, path, action, value)
-                    if r is not None:
-                        results.append(r)
-                return results if results else None
-            return None
-        if not isinstance(node, dict):
-            return None if action == "get" else None
+        results = []
         for k, sub in path.items():
-            if isinstance(sub, dict) and sub:
-                child = node.get(k)
-                if child is None:
-                    if action == "set":
-                        node[k] = {}
-                        child = node[k]
+            if isinstance(node, list) and not isinstance(k, int):
+                rest = sub if isinstance(k, Traverse) else {k: sub}
+                if action == "get":
+                    values = [Record._walk(item, rest, action) for item in node]
+                    results.append([v for v in values if v is not MISSING])
+                elif not rest:
+                    if action == "delete":
+                        node.clear()
+                    elif value is MISSING:
+                        raise ValueError("Missing values cannot occupy array positions")
                     else:
-                        return None if action == "get" else None
-                result = Record._walk(child, sub, action, value)
+                        node[:] = [copy.deepcopy(output_value(value)) for _ in node]
+                else:
+                    for i, item in enumerate(node):
+                        if isinstance(item, (dict, list)):
+                            node[i] = copy.copy(item)
+                            Record._walk(node[i], rest, action, value)
+                continue
+            valid = isinstance(node, dict) and isinstance(k, str)
+            if isinstance(node, list) and isinstance(k, int):
+                valid = -len(node) <= k < len(node)
+                if not valid and action == "set":
+                    raise IndexError(f"Array index {k} is out of range")
+            if not valid:
                 if action == "get":
-                    return result
-            else:
+                    results.append(MISSING)
+                elif action == "set":
+                    raise TypeError("Path does not match the container type")
+                continue
+            child = node.get(k, MISSING) if isinstance(node, dict) else node[k]
+            if sub:
                 if action == "get":
-                    return node.get(k)
-                if action == "set":
-                    node[k] = value
-                elif action == "delete":
+                    results.append(Record._walk(child, sub, action))
+                elif child is not MISSING or action == "set":
+                    if child is MISSING:
+                        child = [] if isinstance(next(iter(sub)), int) else {}
+                    if isinstance(child, (dict, list)):
+                        child = copy.copy(child)
+                    Record._walk(child, sub, action, value)
+                    node[k] = child
+            elif action == "get":
+                results.append(child)
+            elif action == "set":
+                if value is MISSING:
+                    if isinstance(node, list):
+                        raise ValueError("Missing values cannot occupy array positions")
                     node.pop(k, None)
-        return None
+                else:
+                    node[k] = copy.deepcopy(output_value(value))
+            elif action == "delete":
+                if isinstance(node, dict):
+                    node.pop(k, None)
+                else:
+                    del node[k]
+        return results[0] if results else MISSING
 
     # ---- public API ----
 
-    def get(self, indexer):
-        return self._walk(self.data, self.resolve(indexer), "get")
+    def get(self, indexer, default=None):
+        value = self._walk(self.data, self.resolve(indexer), "get")
+        return default if value is MISSING else value
 
     def set(self, indexer, value) -> "Record":
         self._walk(self.data, self.resolve(indexer), "set", value)
@@ -166,23 +192,23 @@ class Record:
         return self
 
     def add(self, indexer, value) -> "Record":
-        """Set only if missing (treats None as missing)."""
-        if self.get(indexer) is None:
+        """Set only if absent; preserve explicit null."""
+        if self.get(indexer, MISSING) is MISSING:
             self.set(indexer, value)
         return self
 
     def mv(self, src, dst) -> "Record":
         """Move value from src path to dst path."""
-        v = self.get(src)
+        v = self.get(src, MISSING)
         self.delete(src)
-        if v is not None:
+        if v is not MISSING:
             self.set(dst, v)
         return self
 
     def cpy(self, src, dst) -> "Record":
         """Copy value from src path to dst path (keeps src)."""
-        v = self.get(src)
-        if v is not None:
+        v = self.get(src, MISSING)
+        if v is not MISSING:
             self.set(dst, v)
         return self
 
@@ -195,4 +221,4 @@ class Record:
         self.set(indexer, value)
 
     def __contains__(self, indexer) -> bool:
-        return self.get(indexer) is not None
+        return self.get(indexer, MISSING) is not MISSING

@@ -1,220 +1,87 @@
-# Program — Deferred Expr Pipeline with Row-Based Caching
+# Programs, caches, and saved runs
 
-`Program` stores a sequence of **expr statements** (tuples from `assign()`,
-`keep()`, etc.) and replays them on a DataTree when called. Caching is
-**row-based**: each input record is hashed individually; cache hits return
-stored output rows, cache misses run the full pipeline on a single-row
-DataTree.
-
-**Key design decisions:**
-
-- **Expr-only** — Programs only accept `expr` statements (not arbitrary
-  DataTree methods). For complex pipelines, compose with `dt.expr()` directly.
-- **Row-based caching** — each row is hashed (SHA-256 of sorted JSON).
-  Rows filtered out by `keep` are cached as `null` and skipped on replay.
-- **Persistent cache** — `FileCache` stores JSON files in `.sunbear_cache/`.
-  A custom cache name (or auto-hash from statements) keys the file.
-
----
-
-## Usage
-
-### Basic Pipeline
+A Program is an immutable, compiled row-local transformation. Creating or
+extending one validates every statement, including unselected conditional
+branches, before consuming data. All currently supported statements are
+row-local (including row filtering). Global and expanding statement kinds are
+rejected; use explicit DataTree global operations outside a Program.
 
 ```python
-from sunbear import Program, DataTree
+from sunbear import DataTree, Program, FileCache, write_jsonl, read_jsonl
 from sunbear.expr import b, assign, keep
 
-dt = DataTree.from_records([
-    {"name": "Alice", "age": 30, "score": 85},
-    {"name": "Bob",   "age": 17, "score": 42},
-    {"name": "Carol", "age": 25, "score": 91},
-])
+base = Program(name="adults").expr(keep(b.age >= 18))
+labeled = base.expr(assign(status="active"))  # base remains unchanged
+rows = DataTree.from_records([{"age": 30}, {"age": 17}])
+assert labeled(rows).collect() == [{"age": 30, "status": "active"}]
+```
 
-prog = Program(name="adults").expr(
-    assign(b.tier, "standard"),
-    keep(b.age >= 18),
+Execution preserves source replayability and uses the same compiled executor
+as DataTree.expr(). Statements inside fork/case have the same semantics as
+top-level statements; keep(False) filters the row from the whole program.
+TransformationError carries step, row, operation, and a target path where
+available. The original exception remains available as __cause__. Nested
+errors refer to the step within their block. Input records are not printed.
+
+Programs own a copy of their expressions and literals. Python callbacks remain
+external code: callers must keep them pure if they want deterministic replay.
+Declarative writes copy modified ancestors. Untouched branches can remain
+shared. Direct Record access and arbitrary callbacks are explicit mutable
+interfaces; use materialize() when a fully isolated output snapshot is needed.
+
+## Explicit caching
+
+```python
+cached = Program(cache=FileCache("adults")).expr(keep(b.age >= 18))
+assert cached(rows).collect() == [{"age": 30}]
+```
+
+A display name does not configure caching or determine computation identity.
+Keys include a format version, normalized operations, parameters, and input
+data. Extending a program produces a different namespace, even when both use
+the same FileCache. Cache hits still preserve each input occurrence.
+
+Callbacks require cache_version:
+
+```python
+from sunbear.expr import sbo
+cached = Program(cache=FileCache("tags"), cache_version="normalize-v1").expr(
+    assign(tags=sbo.map(b.tags, str.lower))
 )
-
-result = prog(dt)   # cache miss — executes pipeline
-result = prog(dt)   # cache hit — skips computation
 ```
 
-### Streaming Source (Lazy Execution)
+cache_version is a caller-maintained identifier for callback implementations
+and every external/captured dependency. Change it whenever any dependency
+changes. It is not an automatic code fingerprint. Cache only deterministic
+row-local computations. Metadata and callback side effects are not memoized;
+cache records represent output data, not an execution log.
 
-`prog(dt)` returns a lazy DataTree — the pipeline runs on demand as the
-caller pulls rows. This works with any iterable source (WebSocket, file, etc.):
+The codec accepts JSON objects with string keys, lists, strings, finite
+floats, integers, booleans, and null. Tuples, dates, custom objects, missing
+markers, non-string keys, and non-finite floats raise instead of becoming
+strings. Convert them explicitly before caching or saving.
+
+FileCache batches writes (flush_every=100 by default), flushes on completed
+execution or generator cleanup, and supports explicit flush(). It atomically
+replaces its JSON file. A suspended iterator may still have pending entries;
+call cache.flush() when durable persistence is required before completion.
+Each file supports one writer. Old cache formats are rejected; use a new
+filename or remove the obsolete cache.
+
+## Save an execution
 
 ```python
-from sunbear.expr import select, sbo
-
-prog = Program().expr(
-    *select(b.author, tags=b.commit.record.tags, createdAt=b.commit.record.createdAt),
-    keep(b.tags != None),
-    assign(b.tags, sbo.flatten(b.tags)),
-)
-
-dt = DataTree.from_iter(jetstream_generator())
-result = prog(dt)          # nothing consumed yet — lazy generator
-
-# Pull rows on demand:
-for row in result.irows(tags=b.tags, createdAt=b.createdAt):
-    print(row)
-    break                  # only one row pulled from the stream
+write_jsonl(labeled(rows), "adults.jsonl")
+saved = read_jsonl("adults.jsonl")
+assert saved.collect() == labeled(rows).collect()
 ```
 
-### Keyword `assign` Sugar
+write_jsonl consumes finite output incrementally into a temporary file and
+publishes the destination atomically only after success. Order and duplicates
+are preserved. A failed transformation or serialization leaves an existing
+destination intact. read_jsonl reopens the file on each traversal.
 
-```python
-prog = Program().expr(
-    assign(tags=b.commit.record.tags, createdAt=b.commit.record.createdAt),
-    keep(b.tags != None),
-)
-# equivalent to:
-# assign(b.tags, b.commit.record.tags),
-# assign(b.createdAt, b.commit.record.createdAt),
-```
-
-### Pipe Syntax
-
-```python
-result = dt | prog
-```
-
-### Loading Cached Results
-
-```python
-dt_from_cache = prog.to_DataTree()
-```
-
----
-
-## Program Construction
-
-```python
-# Auto-hashed cache name (derived from statements)
-prog = Program().expr(assign(b.x, 1))
-
-# Explicit name (human-readable cache file)
-prog = Program(name="my_pipeline").expr(assign(b.x, 1))
-
-# Custom cache backend
-from sunbear import FileCache
-prog = Program(cache=FileCache("my_pipeline")).expr(assign(b.x, 1))
-```
-
-### `Program.__repr__()`
-
-```python
->>> prog = Program(name="test").expr(assign(b.status, "ok"))
->>> repr(prog)
-"Program('test', 1 stmts)"
-
->>> Program().expr(assign(b.x, 1))
-"Program('<auto>', 1 stmts)"
-```
-
----
-
-## Cache Architecture
-
-### Row Hashing
-
-Each input record's `data` dict is hashed with `_row_hash`:
-
-```python
-def _row_hash(data: dict) -> str:
-    raw = json.dumps(data, sort_keys=True, default=str)
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
-```
-
-### Program Key (Cache Namespace)
-
-The program key determines the cache file name:
-
-1. If `name` is provided, it's used directly.
-2. Otherwise, statements are serialized to stable JSON and SHA-256 hashed.
-
-```python
-prog_a = Program().expr(assign(b.x, 1))
-prog_b = Program().expr(assign(b.x, 1))
-# Same statements → same auto-hash → same cache
-```
-
----
-
-## AbstractCache Backend
-
-### `AbstractCache` (ABC)
-
-| Method | Description |
-|---|---|
-| `get(row_key) -> dict | _FILTERED | None` | Return `dict` for hit, `_FILTERED` for filtered rows, `None` for miss |
-| `set(row_key, output)` | Cache output dict (or `None` for filtered) |
-| `to_DataTree()` | Reconstruct DataTree from all cached rows |
-
-### `FileCache`
-
-JSON-file backend at `.sunbear_cache/{name}.json`.
-
-**File format:**
-```json
-{
-  "<row_key>": {
-    "data": {...} | null,
-    "ts": <epoch_timestamp>
-  },
-  ...
-}
-```
-
-- `data: null` means the row was filtered out.
-- `to_DataTree()` loads all non-null cached entries.
-
-```python
-from sunbear import FileCache
-
-cache = FileCache("adults")
-cache.set("abc123", {"name": "Alice", "tier": "standard"})
-data = cache.get("abc123")  # {"name": "Alice", "tier": "standard"}
-```
-
----
-
-## Execution Flow
-
-When `prog(dt)` is called, a **lazy** DataTree backed by a generator is
-returned — rows are produced on demand as the caller iterates/collects/scans.
-This means streaming sources (WebSocket generators, file readers, etc.) stay
-lazy: each row is processed only when the downstream consumer pulls it.
-
-For each `(record, meta)` yielded by the input DataTree:
-
-1. Hash `record.data` to get `row_key`
-2. Check cache:
-   - `_FILTERED` → skip row
-   - `dict` → cache hit, yield stored output
-   - `None` → cache miss:
-     1. Wrap in single-row DataTree
-     2. Run full expr pipeline
-     3. If result empty → cache as `null` (filtered)
-     4. Else → cache output dict, yield it
-
-The returned DataTree is itself lazy (`from_iter`), so chaining operations
-like `.irows()`, `.pluck()`, `.collect()` will stream incrementally.
-
----
-
-## `to_DataTree()`
-
-Reconstruct a standalone DataTree from all cached (non-filtered) rows:
-
-```python
-prog = Program(name="adults").expr(assign(b.tier, "standard"), keep(b.age >= 18))
-result = prog(dt)
-
-# Later, load results without re-executing:
-dt_cached = prog.to_DataTree()
-```
-
-Raises `RuntimeError` if no cache is configured.
+to_DataTree() remains deprecated for cache inspection. Its entries are unique
+memoized inputs accumulated across runs and namespaces, not the ordered output
+of the latest execution. It emits a warning; migrate saved-output workflows to
+write_jsonl/read_jsonl.

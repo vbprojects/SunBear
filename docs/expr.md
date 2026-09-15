@@ -424,3 +424,16 @@ from sunbear.expr.lower import run_expr
 
 result = run_expr(dt, assign(b.x, 1))
 ```
+
+## Compiled execution and paths (0.3)
+
+DataTree.expr and Program use one row-local executor. Every branch is validated
+at construction, and all statement kinds work inside fork/case, including keep
+and assert_. A failing keep inside a branch drops the row from the pipeline.
+Global and expanding statement kinds are rejected before reading input.
+
+Paths accept literal bracket keys, integer indices, and explicit [...] list
+traversal. Use b["exists"] to address a field colliding with an expression
+method. Missing and null differ: b.x.exists(), b.x.is_null(),
+b.x.is_not_null(), and b.x.fill_missing(value) express the intended policy.
+See the 0.3 migration guide for compatibility details.

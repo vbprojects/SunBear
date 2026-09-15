@@ -31,3 +31,8 @@ __all__ = [
     "infer_schema", "reconcile", "combine_types",
     "expr",
 ]
+
+from .paths import MISSING, PathSpec, Key, Index, Traverse
+from .sinks import write_jsonl, read_jsonl
+from .expr.lower import TransformationError
+__all__ += ["MISSING", "PathSpec", "Key", "Index", "Traverse", "write_jsonl", "read_jsonl", "TransformationError"]
