@@ -1,11 +1,20 @@
 """Keep the README quick-start result synchronized with public behavior."""
+
 import unittest
+import re
+from pathlib import Path
 
 import sunbear as sb
 from sunbear.expr import assign, b, keep, sbo
 
 
 class TestReadmeQuickStart(unittest.TestCase):
+    def test_actual_readme_examples(self):
+        text = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+        namespace = {}
+        for i, block in enumerate(re.findall(r"```python\n(.*?)```", text, flags=re.S)):
+            exec(compile(block, f"README example {i + 1}", "exec"), namespace)
+
     def test_expression_pipeline(self):
         records = [
             {"name": "Alice", "age": 30, "tags": [["ring"], ["gold"]]},
@@ -13,23 +22,35 @@ class TestReadmeQuickStart(unittest.TestCase):
             {"name": "Carol", "age": 17, "tags": [["silver"], ["bronze"]]},
         ]
 
-        result = sb.DataTree.from_records(records).expr(
-            assign(b.status, "active"),
-            assign(b.flat_tags, sbo.flatten(b.tags, -1)),
-            keep(b.age >= 18),
-        ).collect()
+        result = (
+            sb.DataTree.from_records(records)
+            .expr(
+                assign(b.status, "active"),
+                assign(b.flat_tags, sbo.flatten(b.tags, -1)),
+                keep(b.age >= 18),
+            )
+            .collect()
+        )
 
-        self.assertEqual(result, [
-            {
-                "name": "Alice", "age": 30,
-                "tags": [["ring"], ["gold"]],
-                "status": "active", "flat_tags": ["ring", "gold"],
-            },
-            {
-                "name": "Bob", "age": 25, "tags": [],
-                "status": "active", "flat_tags": [],
-            },
-        ])
+        self.assertEqual(
+            result,
+            [
+                {
+                    "name": "Alice",
+                    "age": 30,
+                    "tags": [["ring"], ["gold"]],
+                    "status": "active",
+                    "flat_tags": ["ring", "gold"],
+                },
+                {
+                    "name": "Bob",
+                    "age": 25,
+                    "tags": [],
+                    "status": "active",
+                    "flat_tags": [],
+                },
+            ],
+        )
 
 
 if __name__ == "__main__":
